@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Editor and operating system
+.vscode/
+.idea/
+.DS_Store
+
+# Local path configuration
+config/local_cfg.yaml
+local_cfg.yaml
+
+# Raw and processed datasets
+ecg_data/
+semg_data/
+dataset/
+processed/
+data/
+outputs/
+
+# Checkpoints
+model_weight/
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+
+# Scientific data files
+*.npy
+*.npz
+*.mat
+*.dat
+*.hea
+*.atr
+*.xws
+
+# Experiment outputs
+logs/
+analysis/
+results/
+runs/
+tensorboard/
+
+# Generated figures
+inference_*.png
+
+# Python build files
+build/
+dist/
+*.egg-info/
+*.so
+
+# Backup and temporary files
+*.bak
+*.backup
+*.tmp

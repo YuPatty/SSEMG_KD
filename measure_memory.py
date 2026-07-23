@@ -1,39 +1,61 @@
+# ────────────────────────────────────────────────────
+# measure_memory.py
+# 用 torchinfo 分析 StudentSSEMGNet（我們真正訓練出來的模型）的
+# 逐層參數量、記憶體佔用、運算量，而不是簡化版的假模型。
+#
+# 用法：
+#   python measure_memory.py
+#   python measure_memory.py --student_weights model_weight/student_production_annealed_60.pth
+# ────────────────────────────────────────────────────
+import os, sys, argparse
+import yaml
 import torch
-import torch.nn as nn
 from torchinfo import summary
 
-# 定義學生模型
-class TSConv(nn.Module):
-    def __init__(self, in_channels=2, num_layers=4, out_channels=2):
-        super(TSConv, self).__init__()
-        layers = []
-        curr_ch = in_channels
-        hidden_ch = 64
-        for i in range(num_layers):
-            next_ch = hidden_ch if i < num_layers - 1 else out_channels
-            layers.append(nn.Conv2d(curr_ch, next_ch, kernel_size=3, padding=1))
-            if i < num_layers - 1:
-                layers.append(nn.ReLU())
-            curr_ch = next_ch
-        self.net = nn.Sequential(*layers)
+ROOT_DIR = os.path.dirname(__file__)
+sys.path.insert(0, os.path.join(ROOT_DIR, 'MECG-E'))
+from models.StudentNet import StudentSSEMGNet   # noqa: E402
 
-    def forward(self, x):
-        return self.net(x)
 
 def main():
-    model = TSConv()
-    batch_size = 1
-    # 你的輸入大小：[Batch, Channels, Time, Freq]
-    input_shape = (batch_size, 2, 79, 257)
-    
-    print("\n" + "="*60)
-    print("🧠 Student (TSConv) 模型資源佔用分析報告")
-    print("="*60)
-    
-    # 呼叫 torchinfo 進行深度分析
-    summary(model, input_size=input_shape, 
-            col_names=["input_size", "output_size", "num_params", "mult_adds"],
-            depth=3)
+    p = argparse.ArgumentParser()
+    p.add_argument("--student_config", default="config/config_student_crossarch.yaml")
+    p.add_argument("--student_weights", default=None,
+                    help="指定的話會用 strict=True 載入並驗證架構完全對得上，"
+                         "不指定則用隨機初始化權重（不影響參數量/FLOPs 分析結果）")
+    args = p.parse_args()
+
+    with open(args.student_config) as f:
+        student_cfg = yaml.safe_load(f)
+
+    model = StudentSSEMGNet(student_cfg)
+
+    if args.student_weights:
+        state = torch.load(args.student_weights, map_location='cpu')
+        model.load_state_dict(state, strict=True)
+        print(f"✅ 已載入並驗證 checkpoint：{args.student_weights}")
+
+    B = 1
+    C = student_cfg.get('input_channels', 2)
+    Fbin = student_cfg.get('input_freq_bins', student_cfg['model']['n_fft'] // 2 + 1)
+    T = student_cfg.get('input_time_bins', 79)
+
+    print("\n" + "=" * 70)
+    print("🧠 StudentSSEMGNet 模型資源佔用分析報告")
+    print("=" * 70)
+
+    # StudentSSEMGNet.forward 需要兩個輸入（clean, noisy），
+    # torchinfo 的 input_data 用 list 傳多個輸入 tensor
+    clean = torch.randn(B, C, Fbin, T)
+    noisy = torch.randn(B, C, Fbin, T)
+
+    summary(
+        model,
+        input_data=[clean, noisy],
+        col_names=["input_size", "output_size", "num_params", "mult_adds"],
+        depth=4,
+    )
+
 
 if __name__ == "__main__":
     main()

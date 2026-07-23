@@ -621,8 +621,11 @@ class SSEMGNet(nn.Module):
 
         # Step 3: 編碼器 → Mamba Block(s)
         x_feat = self.dense_encoder(x_input)                             # [B, C, T, F/2]
+        feat_list = []                                                   # ★ KD: 收集每層 TF-Bi-Mamba 輸出
         for i in range(self.num_tscblocks):
             x_feat = self.TSMamba[i](x_feat)                             # [B, C, T, F/2]
+            feat_list.append(x_feat)
+        self.last_feats = feat_list                                      # ★ KD: 供 feature-based distillation 使用
 
         # Step 4: 幅度遮罩預測與應用（mask_out 要是 [B,1,T,F]）
         mask_out = self.mask_decoder(x_feat)                             # [B, 1, T, F]
@@ -773,6 +776,15 @@ class SSEMGNet(nn.Module):
                               "clean": wav_c.detach().float()}
         else:
             self.last_wavs = None
+
+        # ★ KD: 暫存 response-level 輸出（mask / mag / phase / complex spectrogram）
+        #   注意：這裡刻意「不」 detach，讓呼叫端自己決定 teacher 要 detach、student 要保留 graph
+        self.last_outputs = {
+            "mask":     mask_out,     # [B, 1, T, F]
+            "mag_g_FT": mag_g_FT,     # [B, F, T]
+            "pha_g":    pha_g,        # [B, F, T]
+            "com_g":    com_g,        # [B, F, T, 2]
+        }
 
         return loss_core   # ← ★ 只回核心四項，用它做 backward
 

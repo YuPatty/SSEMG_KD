@@ -211,6 +211,9 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
         train_gt_epoch = running_gt / max(1, len(train_loader))
         train_kd_epoch = running_kd / max(1, len(train_loader))
 
+        # 👇 新增這一行：取出該圈平均的子項 loss，供防呆儀表板計算比例使用 👇
+        avg_info = {k: v / max(1, len(train_loader)) for k, v in running_info.items()}
+
         print(f"★ Epoch {ep} | train_gt={train_gt_epoch:.4f} | train_kd={train_kd_epoch:.4f} "
               f"| alpha={alpha:.2f} | val_gt={val_gt:.4f} | val_mf={val_mf:.4f} Hz")
               # =========================================================================

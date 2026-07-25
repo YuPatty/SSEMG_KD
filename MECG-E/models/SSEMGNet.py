@@ -16,7 +16,64 @@ from joblib import Parallel, delayed
 from functools import partial
 from mamba_ssm.models.mixer_seq_simple import Block, _init_weights
 from mamba_ssm.modules.mamba_simple import Mamba
-from mamba_ssm.ops.triton.layer_norm import RMSNorm
+import mamba_ssm.modules.mamba_simple as _mamba_simple_module
+from mamba_ssm.ops.triton.layer_norm import RMSNorm as _TritonRMSNorm
+
+# ── CPU 相容性修補（第二處，比 RMSNorm 更隱蔽）──────────────────
+# 實測發現：即使 Mamba(..., use_fast_path=False)，mamba_simple.py 內部呼叫
+# causal_conv1d_fn 的判斷邏輯，並不是看 use_fast_path，而是獨立判斷
+# 「causal_conv1d_fn 這個名稱在模組命名空間裡是不是 None」——只要環境裡
+# 裝了 causal_conv1d 套件（這個名稱因此不是 None），不管 use_fast_path
+# 設什麼，都會被觸發並在 CPU tensor 上崩潰。
+# 同樣地，當 use_fast_path=False 時，Mamba 仍會呼叫 selective_scan_fn，
+# 而它底層綁死了 selective_scan_cuda，導致在 CPU 報錯。
+# 修法：沒有 CUDA 時，將 causal_conv1d 設為 None 觸發 fallback；
+# 並將 selective_scan_fn 強制替換為純 PyTorch 實作的 selective_scan_ref。
+if not torch.cuda.is_available():
+    _mamba_simple_module.causal_conv1d_fn = None
+    _mamba_simple_module.causal_conv1d_update = None
+    
+    # 替換 selective_scan_fn 為 PyTorch 參考實作
+    try:
+        from mamba_ssm.ops.selective_scan_interface import selective_scan_ref
+        _mamba_simple_module.selective_scan_fn = selective_scan_ref
+    except ImportError:
+        pass
+
+# ── CPU 相容性修補 ──────────────────────────────────────────
+# 原本的 RMSNorm 是從 mamba_ssm.ops.triton.layer_norm 匯入的 Triton 版本，
+# 即使 Block 的 fused_add_norm=False，只要呼叫 self.norm(x) 內部一樣會觸發
+# Triton kernel（RuntimeError: invalid argument to exchangeDevice），CPU
+# 環境完全無法執行。這裡另外實作一個數學等價、純 PyTorch 的 RMSNorm，只在
+# 沒有 CUDA 的環境自動切換使用，GPU 環境完全不受影響（維持原本的 Triton
+# 加速路徑，速度不變、不影響你已經測過的 28.26ms 那組結果）。
+class _PlainRMSNorm(nn.Module):
+    """跟 mamba_ssm 的 Triton RMSNorm 數學上等價的純 PyTorch 版本，
+    參數命名（self.weight）刻意保持一致，確保 checkpoint 能用 strict=True 載入。
+
+    呼叫簽章比照實際崩潰堆疊確認過的用法（fused_add_norm=False 時，
+    Block.forward 只會用單一位置參數呼叫 self.norm(x)，不會用到
+    residual/prenorm 這些只有 fused 路徑才需要的關鍵字參數）。"""
+    def __init__(self, hidden_size, eps=1e-5):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+
+    def forward(self, x):
+        dtype = x.dtype
+        x_fp32 = x.float()
+        variance = x_fp32.pow(2).mean(-1, keepdim=True)
+        x_norm = x_fp32 * torch.rsqrt(variance + self.eps)
+        return self.weight * x_norm.to(dtype)
+
+
+def _get_norm_cls(device_type: str):
+    """依裝置自動選擇：CUDA 用原本的 Triton RMSNorm（不影響既有 GPU 效能），
+    CPU 用上面的純 PyTorch 版本（唯一能在 CPU 執行的路徑）。"""
+    return _TritonRMSNorm if device_type == 'cuda' else _PlainRMSNorm
+
+
+RMSNorm = _TritonRMSNorm  # 保留原本的名稱以維持向後相容（其他地方若直接 import RMSNorm 仍可用）
 
 def get_padding(kernel_size, dilation=1):
     return int((kernel_size*dilation - dilation)/2)
@@ -93,14 +150,28 @@ def mag_pha_istft(mag, pha, n_fft, hop_size, win_size, compress_factor=1.0, cent
 class MambaBlock(nn.Module):
     def __init__(self, in_channels, n_layer=1, bidirectional=False):
         super(MambaBlock, self).__init__()
+        # ── CPU 相容性修補 ──
+        # 原本 use_fast_path=True 強制 Mamba 核心的 selective scan 一定走
+        # Triton/CUDA 加速路徑，CPU 上會直接崩潰。這裡在「建構模型的當下」
+        # 先偵測有沒有 CUDA，沒有的話就把 use_fast_path 設 False，讓 Mamba
+        # 自動切換成官方內建的純 PyTorch fallback（slow_forward），可以在
+        # CPU 上跑，只是速度慢很多——這是「能不能跑」與「跑多快」的取捨，
+        # 不是要用這個路徑真的拿去部署，純粹是為了量測 CPU 延遲這個對照數字。
+        # GPU 環境完全不受影響：torch.cuda.is_available()=True 時，
+        # use_fast_path 仍是 True，跟原本行為一致。
+        use_cuda = torch.cuda.is_available()
+        norm_cls_selected = partial(_TritonRMSNorm, eps=1e-5) if use_cuda else partial(_PlainRMSNorm, eps=1e-5)
+        use_fast_path_selected = True if use_cuda else False
+
         self.forward_blocks = nn.ModuleList([])
         for i in range(n_layer):
             self.forward_blocks.append(
                 Block(
                     in_channels,
-                    mixer_cls=partial(Mamba, layer_idx=i, d_state=16, d_conv=4, expand=4, use_fast_path=True),
+                    mixer_cls=partial(Mamba, layer_idx=i, d_state=16, d_conv=4, expand=4,
+                                       use_fast_path=use_fast_path_selected),
                     mlp_cls=nn.Identity, 
-                    norm_cls=partial(RMSNorm, eps=1e-5),
+                    norm_cls=norm_cls_selected,
                     fused_add_norm=False,
                 )
             )
@@ -111,9 +182,10 @@ class MambaBlock(nn.Module):
                 self.backward_blocks.append(
                     Block(
                         in_channels,
-                        mixer_cls=partial(Mamba, layer_idx=i, d_state=16, d_conv=4, expand=4, use_fast_path=True),
+                        mixer_cls=partial(Mamba, layer_idx=i, d_state=16, d_conv=4, expand=4,
+                                           use_fast_path=use_fast_path_selected),
                         mlp_cls=nn.Identity,
-                        norm_cls=partial(RMSNorm, eps=1e-5),
+                        norm_cls=norm_cls_selected,
                         fused_add_norm=False,
                     )
                 )

@@ -6,6 +6,25 @@ import sys
 import os
 import argparse
 
+# ── 終極 CPU Monkey-patch (強制覆寫 Triton RMSNorm) ──
+import torch.nn as nn
+class _PlainRMSNorm(nn.Module):
+    def __init__(self, hidden_size, eps=1e-5, **kwargs):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+
+    def forward(self, x):
+        dtype = x.dtype
+        x_fp32 = x.float()
+        variance = x_fp32.pow(2).mean(-1, keepdim=True)
+        x_norm = x_fp32 * torch.rsqrt(variance + self.eps)
+        return self.weight * x_norm.to(dtype)
+
+# 強制攔截 mamba_ssm 內部的 Triton 呼叫
+import mamba_ssm.ops.triton.layer_norm
+mamba_ssm.ops.triton.layer_norm.RMSNorm = _PlainRMSNorm
+# ──────────────────────────────────────────────────
 ROOT_DIR = os.path.dirname(__file__)
 sys.path.insert(0, os.path.join(ROOT_DIR, 'MECG-E'))
 from models.SSEMGNet import SSEMGNet

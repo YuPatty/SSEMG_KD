@@ -27,10 +27,11 @@ def main():
                          "確認 checkpoint 能不能正常載入，建議指定這個參數）")
     p.add_argument("--num_runs", type=int, default=100)
     p.add_argument("--num_warmup", type=int, default=10)
-    p.add_argument("--signal_length_sec", type=float, default=1.0,
-                    help="⚠️ 請依你的實際 segment 長度確認這個值是否正確，"
-                         "不要照抄預設值——要跟 config 裡的 STFT 設定（n_fft/hop_size/"
-                         "input_time_bins）換算出來的實際訊號秒數一致，否則 RTF 沒有意義")
+    p.add_argument("--n_frames", type=int, default=79)
+    p.add_argument("--signal_length_sec", type=float, default=None,
+                    help="不指定的話會依 config 的 sampling_rate/hop_size/n_frames 動態算出"
+                         "正確的訊號長度（本專案設定下約 10.112 秒，不是 1 秒——之前這裡"
+                         "預設寫死 1.0 是錯的，已修正為動態計算，避免同樣的錯誤再發生）")
     args = p.parse_args()
 
     device = torch.device(args.device)
@@ -38,6 +39,13 @@ def main():
 
     with open(args.student_config) as f:
         student_cfg = yaml.safe_load(f)
+
+    if args.signal_length_sec is None:
+        sr = float(student_cfg['model'].get('sampling_rate', 1000))
+        hop_size = float(student_cfg['model']['hop_size'])
+        args.signal_length_sec = (args.n_frames * hop_size) / sr
+        print(f"訊號長度未指定，依 config 動態算出：{args.signal_length_sec:.4f} 秒 "
+              f"[= {args.n_frames}幀 × hop_size{hop_size} / sr{sr}]")
 
     model = StudentSSEMGNet(student_cfg).to(device)
     model.eval()

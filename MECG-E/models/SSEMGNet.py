@@ -863,3 +863,4 @@ class SSEMGNet(nn.Module):
 
 # Backward-compatible alias for legacy training scripts/checkpoints.
 MECGE = SSEMGNet
+

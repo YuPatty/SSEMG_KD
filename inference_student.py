@@ -418,7 +418,19 @@ with torch.no_grad():
     wav_clean=istft_from_FT(cmag_FT,cpha_FT,cfg)
 minL=int(min(wav_clean.size(-1),wav_deno.size(-1),wav_noisy.size(-1)))
 clean_wav=wav_clean[0,:minL].cpu().numpy(); denoised=wav_deno[0,:minL].cpu().numpy(); noisy_wav=wav_noisy[0,:minL].cpu().numpy()
-plt.figure(figsize=(15,4))
-plt.plot(clean_wav,label='Clean',lw=1); plt.plot(noisy_wav,label='Noisy',alpha=.5); plt.plot(denoised,label='Denoised',alpha=.8)
-plt.title(f"[SSEMG-Net] Index {idx} waveform"); plt.legend(); plt.tight_layout(); plt.savefig(SAVE_FIG); plt.close()
+
+# 建立 3 個上下排列的子圖
+fig, axs = plt.subplots(3, 1, figsize=(15, 7), sharex=True, sharey=True)
+
+axs[0].plot(clean_wav, label='Clean', color='tab:blue')
+axs[0].legend(loc='upper right')
+axs[1].plot(noisy_wav, label='Noisy (Input)', color='tab:orange', alpha=0.8)
+axs[1].legend(loc='upper right')
+axs[2].plot(denoised, label='Denoised (Output)', color='tab:green')
+axs[2].legend(loc='upper right')
+
+plt.suptitle(f"[SSEMG-Net] Index {idx} waveform Comparison", fontsize=14)
+plt.tight_layout()
+plt.savefig(SAVE_FIG, dpi=300) # 加上 dpi=300 讓圖片輸出更清晰
+plt.close()
 print(f"✓ plot saved => {SAVE_FIG}")

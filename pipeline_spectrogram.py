@@ -14,7 +14,7 @@ def _autocast_ctx(device):            # 依舊包一層，之後呼叫不用改
 # ── 讓 MECGE 可以 import ───────────────────────────
 ROOT_DIR = os.path.dirname(__file__)
 sys.path.insert(0, os.path.join(ROOT_DIR, 'MECG-E'))
-from models.SSEMGNet import SSEMGNet           # noqa: E402
+# from models.SSEMGNet import SSEMGNet           # noqa: E402
 
 # ═══════════════════════════════════════════════════
 # utils
@@ -58,7 +58,9 @@ def auto_select_gpu(min_used=100, idle_util=5):
         best = max(idle, key=lambda g: g['free']) if idle else max(gpus, key=lambda g: g['free'])
 
         os.environ['CUDA_VISIBLE_DEVICES'] = str(best['idx'])
-        print(f"[Auto GPU] GPU{best['idx']}  free={best['free']}MiB  used={best['used']}MiB  util={best['util']}%")
+        torch.cuda.init()
+        _ = torch.zeros(1).cuda()   # 實際測試這張卡能不能配置記憶體
+        print(f"[Auto GPU] GPU{best['idx']} free={best['free']}MiB used={best['used']}MiB util={best['util']}%")
         return torch.device('cuda')
     except Exception as e:           # 捕獲任何錯誤 → CPU
         print(f"[Auto GPU] fallback to CPU ({e})")

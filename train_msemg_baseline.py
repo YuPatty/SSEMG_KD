@@ -91,7 +91,7 @@ def main():
 
     X_tr, y_tr = load_dataset('train', args.data_root)
     X_va, y_va = load_dataset('valid', args.data_root)
-    num_workers = max(0, (os.cpu_count() or 0) // 2)
+    num_workers = 0
     use_pin = (device.type == 'cuda')
 
     train_loader = DataLoader(TensorDataset(y_tr, X_tr), batch_size=args.batch_size, shuffle=True,

@@ -11,17 +11,8 @@
 # 注意：這支腳本會 import SSEMGNet（teacher），需要 mamba_ssm/CUDA 環境才能跑，
 # 跟 StudentNet.py 本身不依賴 mamba_ssm 是兩回事——這裡只是要建構 teacher
 # 模型物件來算參數量/FLOPs，不是要驗證 student 的可攜性。
-#
-# ⚠️ FLOPs 數字的重要限制（務必讀）：
-# thop 這類工具是靠 hook 標準 nn.Module 層（Conv2d、Linear 等）來累加運算量。
-# Mamba 的核心運算（selective scan）是用自訂 Triton/CUDA kernel 寫的，不是
-# 標準 nn.Module 層，thop 的 hook 機制完全抓不到這部分運算量——只有 Mamba
-# 內部的 in_proj/out_proj 這些 Linear 層會被正確計入。
-# 這代表：Student 的 FLOPs 是準確的（純 CNN，標準運算），但 Teacher 的 FLOPs
-# 是嚴重低估的（核心運算被漏算）。算出來的「FLOPs 壓縮比」會比實際情況樂觀，
-# 不能直接拿這個數字宣稱最終的運算量節省比例，只能當一個粗略下界參考。
 # ────────────────────────────────────────────────────
-import os, sys, argparse
+import os, sys, argparse, math
 import yaml
 import torch
 
@@ -29,6 +20,48 @@ ROOT_DIR = os.path.dirname(__file__)
 sys.path.insert(0, os.path.join(ROOT_DIR, 'MECG-E'))
 from models.SSEMGNet import SSEMGNet          # noqa: E402  # 需要 mamba_ssm
 from models.StudentNet import StudentSSEMGNet  # noqa: E402  # 不需要 mamba_ssm
+
+# 嘗試匯入 Mamba，用於綁定 thop 的 custom_ops
+try:
+    from mamba_ssm import Mamba
+except ImportError:
+    Mamba = None
+
+def count_mamba_flops(m, x, y):
+    """
+    自訂 Mamba FLOPs 計算規則。
+    解決 thop 無法追蹤 Selective Scan 自訂 CUDA Kernel 的問題。
+    """
+    input_tensor = x[0]
+    # Mamba 輸入通常是 (Batch, Length, Dim)
+    # 取 -1, -2, 0 確保不受維度順序變化影響
+    B = input_tensor.shape[0]
+    L = input_tensor.shape[-2]
+    D = input_tensor.shape[-1]
+
+    # 動態抓取超參數 (給予預設值以防萬一)
+    d_state = getattr(m, 'd_state', 16)
+    d_inner = getattr(m, 'd_inner', D * 2)
+    dt_rank = getattr(m, 'dt_rank', math.ceil(D / 16))
+    d_conv  = getattr(m, 'd_conv', 4)
+
+    # 1. in_proj: D -> d_inner * 2
+    flops_in_proj = B * L * D * (d_inner * 2)
+    # 2. conv1d
+    flops_conv = B * d_inner * L * d_conv
+    # 3. x_proj
+    flops_x_proj = B * L * d_inner * (dt_rank + d_state * 2)
+    # 4. dt_proj
+    flops_dt_proj = B * L * dt_rank * d_inner
+    # 5. Selective Scan (每個時間步每個通道約 9 ops)
+    flops_scan = B * L * d_inner * d_state * 9
+    # 6. out_proj
+    flops_out_proj = B * L * d_inner * D
+
+    total_flops = flops_in_proj + flops_conv + flops_x_proj + flops_dt_proj + flops_scan + flops_out_proj
+    
+    # 將總合寫入 thop 規定的格式
+    m.total_ops += torch.DoubleTensor([int(total_flops)])
 
 
 def count_params(model):
@@ -43,7 +76,7 @@ def fmt_size(n_params, bytes_per_param=4):
     return mb
 
 
-def count_flops(model, clean, noisy, model_name=""):
+def count_flops(model, clean, noisy, model_name="", custom_ops=None):
     """
     用 thop 測 FLOPs。回傳 (macs, params_from_thop)。
     捕捉例外，避免某個模型算不出來就讓整支腳本掛掉。
@@ -57,7 +90,8 @@ def count_flops(model, clean, noisy, model_name=""):
     model.eval()
     try:
         with torch.no_grad():
-            macs, params = profile(model, inputs=(clean, noisy), verbose=False)
+            # 引入 custom_ops 參數
+            macs, params = profile(model, inputs=(clean, noisy), custom_ops=custom_ops, verbose=False)
         return macs, params
     except Exception as e:
         print(f"[警告] {model_name} 的 FLOPs 計算失敗：{e}")
@@ -108,25 +142,27 @@ def main():
     if not args.skip_flops:
         print()
         print("=" * 60)
-        print("FLOPs（⚠️ Teacher 數字因 Mamba 自訂 CUDA kernel 未被計入，"
-              "是嚴重低估的下界，不是真實值——見檔案開頭說明）")
+        print("FLOPs（Teacher 包含 Mamba SSM 核心的理論估算值）")
         print("=" * 60)
 
         B, F_, T_ = args.batch_size, args.freq_bins, args.time_bins
         clean = torch.randn(B, 2, F_, T_, device=device)
         noisy = torch.randn(B, 2, F_, T_, device=device)
 
-        t_macs, _ = count_flops(teacher, clean, noisy, "Teacher")
+        # 綁定 custom_ops 字典給 Teacher 模型
+        teacher_custom_ops = {Mamba: count_mamba_flops} if Mamba is not None else None
+        
+        t_macs, _ = count_flops(teacher, clean, noisy, "Teacher", custom_ops=teacher_custom_ops)
         s_macs, _ = count_flops(student, clean, noisy, "Student")
 
         if t_macs is not None and s_macs is not None:
             t_gflops = t_macs * 2 / 1e9   # MACs → FLOPs 慣例乘 2
             s_gflops = s_macs * 2 / 1e9
-            print(f"{'':12}{'GFLOPs (下界)':>18}")
-            print(f"{'Teacher':12}{t_gflops:>18.4f}  ← 嚴重低估，真實值更高")
-            print(f"{'Student':12}{s_gflops:>18.4f}  ← 可信")
+            print(f"{'':12}{'GFLOPs':>18}")
+            print(f"{'Teacher':12}{t_gflops:>18.4f}  ← 已補足 Mamba 內部算力")
+            print(f"{'Student':12}{s_gflops:>18.4f}  ← 純 CNN, 可信")
             print()
-            print(f"FLOPs 比值（僅供粗略參考，非真實壓縮比）: {t_gflops / s_gflops:.2f}x")
+            print(f"運算量壓縮比: {t_gflops / s_gflops:.2f}x")
         else:
             print("[提示] 至少一個模型的 FLOPs 計算失敗，無法比較。"
                   "可加 --skip_flops 只看參數量/大小。")
@@ -138,4 +174,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

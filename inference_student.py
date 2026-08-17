@@ -185,7 +185,7 @@ def find_least_used_gpu(threshold_mb=500):
 
 gpu_id = find_least_used_gpu(threshold_mb=8000)
 if torch.cuda.is_available() and gpu_id is not None:
-    device = torch.device(f'cuda:{gpu_id}')
+    device = torch.device('cuda')
     print(f'✔ Auto-selected GPU {gpu_id}')
 else:
     device = torch.device('cpu')

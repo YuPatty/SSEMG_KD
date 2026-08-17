@@ -1,23 +1,18 @@
 # ────────────────────────────────────────────────────
-# train_sdemg_baseline.py
+# train_sdemg_baseline.py  (patched)
 # 用 ConditionalModel + GaussianDiffusion1D（來自 yt-tony-liu/SDEMG 的
 # deep_filter_model.py / ddpm_1d.py）當作額外的 no-KD baseline。
 #
-# ⚠️ SDEMG 跟 FCN / MSEMG 不一樣，是 diffusion model，不能直接套
-# train_fcn_baseline.py 那種「pred = model(noisy); loss = L1(pred, clean)」
-# 的訓練方式。這裡改用 SDEMG 原始碼裡 GaussianDiffusion1D.forward() 內建的
-# diffusion loss（p_losses，對加噪後的訊號預測噪聲），沒有重新推導公式，
-# 直接呼叫 SDEMG 原始的 ddpm_1d.py，避免手刻 diffusion loss 卻推錯的風險。
+# ⚠️ 這個版本補上了跟 SDEMG 官方 trainer.py 對齊的兩個機制（先前版本漏掉的）：
+#   1. ReduceLROnPlateau(factor=0.5, patience=4) —— val_loss 連續 4 epoch 沒進步就把 lr 減半
+#   2. clip_grad_norm_(parameters, max_norm=1.0) —— 每個 batch 都做梯度裁剪
+# 這兩個都是直接對照 SDEMG 官方 trainer.py 第 105 / 168 / 190 行加上去的，
+# 除此之外訓練邏輯（diffusion loss、資料來源、early stopping）都跟原本版本一樣，
+# 只改動這兩處，方便做「補上這兩個機制前後」的乾淨對照實驗。
 #
 # 訓練配方沿用 SDEMG repo 自帶的 cfg/default.yaml（DiffuEMG_10sec_EP40_SS50）：
 #   train_epochs=40, batch_size=64, condition=True, sampling_steps(timesteps)=50,
 #   beta_schedule='cosine', objective='pred_noise', loss_function='l2', lr=1e-4
-# 這些是 SDEMG 有文件化的官方預設值，不是我自己猜的。
-#
-# ── 注意：這裡監控的 val_loss 是 diffusion loss（單步 noise 預測誤差），
-# 不是最終去噪音質。真正的去噪品質（SNR/PRD 等）要跑完整的 reverse diffusion
-# sampling（denoise()，50 步），運算量大很多，建議另外寫 inference 腳本、
-# 只在訓練完之後對 test set 跑一次，不要放進每個 epoch 的 validation loop。
 #
 # 用法：
 #   python train_sdemg_baseline.py \
@@ -31,7 +26,15 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
-ROOT_DIR = os.path.dirname(__file__)
+# 同 train_msemg_baseline.py 的修正：ROOT_DIR 改用 --ssemg_net_root 明確指定，
+# 腳本檔案本身放在任何地方都能跑，不用跟 pipeline_spectrogram.py / MECG-E/
+# 放在同一層資料夾。不傳這個參數時退回原本行為（假設腳本就放在 SSEMG-Net 裡）。
+_p = argparse.ArgumentParser(add_help=False)
+_p.add_argument('--ssemg_net_root', default=None)
+_pre_args, _ = _p.parse_known_args()
+ROOT_DIR = _pre_args.ssemg_net_root or os.path.dirname(os.path.abspath(__file__))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 sys.path.insert(0, os.path.join(ROOT_DIR, 'MECG-E'))
 
 from pipeline_spectrogram import load_dataset, auto_select_gpu
@@ -67,6 +70,9 @@ def spec_to_wav(spec, n_fft, hop_size, win_size, compress_factor):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--sdemg_repo', required=True, help='clone 下來的 SDEMG repo 路徑')
+    p.add_argument('--ssemg_net_root', default=None,
+                    help='SSEMG-Net repo 的路徑（用來找 pipeline_spectrogram.py / MECG-E/）。'
+                         '不指定時預設腳本檔案自己所在的資料夾。')
     p.add_argument('--student_config', default='config_student_crossarch.yaml',
                     help="只用來讀 n_fft/hop_size/win_size/compress_factor 等 STFT 參數")
     p.add_argument('--data_root', default='dataset')
@@ -75,8 +81,14 @@ def main():
     p.add_argument('--epochs', type=int, default=40)
     p.add_argument('--batch_size', type=int, default=64)
     p.add_argument('--lr', type=float, default=1e-4)
-    p.add_argument('--patience', type=int, default=15)
-    p.add_argument('--feats', type=int, default=128)
+    p.add_argument('--patience', type=int, default=15,
+                    help='early stopping patience（官方 trainer.py 其實沒有 early stop，'
+                         '這裡保留只是安全網，40 epoch 內基本不會被觸發）')
+    p.add_argument('--feats', type=int, default=64,
+                    help='ConditionalModel 的 hidden channels。預設 64，對齊 MSEMG 論文 '
+                         'Table II 報告之比較基準（1,233,857 參數）；官方 repo main.py '
+                         '目前預設是 128（4.93M 參數），與此不同，除非你刻意要重現那個版本，'
+                         '否則不要改回 128。')
     p.add_argument('--seq_length', type=int, default=10000)
     p.add_argument('--sampling_steps', type=int, default=50, help='對應 diffusion timesteps')
     p.add_argument('--objective', choices=['pred_noise', 'pred_x0', 'pred_v'], default='pred_noise')
@@ -84,6 +96,14 @@ def main():
     p.add_argument('--beta_schedule', choices=['linear', 'cosine', 'quad'], default='cosine')
     p.add_argument('--condition', action='store_true', default=True,
                     help='ConditionalModel 需要 cond 輸入，SDEMG 原始預設就是 True，不要關掉')
+
+    # ── 新增：跟官方 trainer.py 對齊的兩個機制 ──
+    p.add_argument('--lr_patience', type=int, default=4,
+                    help='ReduceLROnPlateau 的 patience，對齊官方 trainer.py 第105行')
+    p.add_argument('--lr_factor', type=float, default=0.5,
+                    help='ReduceLROnPlateau 的 factor，對齊官方 trainer.py 第105行')
+    p.add_argument('--grad_clip_norm', type=float, default=1.0,
+                    help='gradient clipping 的 max_norm，對齊官方 trainer.py 第168行')
 
     p.add_argument('--log_csv', default='log_sdemg_baseline.csv')
     p.add_argument('--model_save', default='model_weight/sdemg_baseline.pth')
@@ -122,10 +142,14 @@ def main():
           f"timesteps={args.sampling_steps}, objective={args.objective}）")
 
     optim = torch.optim.Adam(diffusion.parameters(), lr=args.lr)
+    # ── 新增 1/2：對齊官方 trainer.py 的 ReduceLROnPlateau ──
+    lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optim, factor=args.lr_factor, patience=args.lr_patience, verbose=True
+    )
 
     X_tr, y_tr = load_dataset('train', args.data_root)
     X_va, y_va = load_dataset('valid', args.data_root)
-    
+
     num_workers = 0
     use_pin = (device.type == 'cuda')
 
@@ -136,7 +160,7 @@ def main():
 
     os.makedirs(os.path.dirname(args.model_save), exist_ok=True)
     with open(args.log_csv, 'w', newline='') as f:
-        csv.writer(f).writerow(['epoch', 'train_diffusion_loss', 'val_diffusion_loss'])
+        csv.writer(f).writerow(['epoch', 'train_diffusion_loss', 'val_diffusion_loss', 'lr'])
 
     best_val = float('inf')
     no_improve = 0
@@ -152,7 +176,6 @@ def main():
             with torch.no_grad():
                 clean_wav = spec_to_wav(clean_spec, n_fft, hop_size, win_size, compress_factor)
                 noisy_wav = spec_to_wav(noisy_spec, n_fft, hop_size, win_size, compress_factor)
-                minL = min(clean_wav.size(-1), noisy_wav.size(-1), args.seq_length)
                 # GaussianDiffusion1D 要求輸入長度剛好等於 seq_length，多截少補
                 clean_wav = _fit_length(clean_wav, args.seq_length)
                 noisy_wav = _fit_length(noisy_wav, args.seq_length)
@@ -162,6 +185,8 @@ def main():
 
             optim.zero_grad()
             loss.backward()
+            # ── 新增 2/2：對齊官方 trainer.py 的 gradient clipping ──
+            torch.nn.utils.clip_grad_norm_(diffusion.parameters(), args.grad_clip_norm)
             optim.step()
 
             running += float(loss.detach())
@@ -182,15 +207,20 @@ def main():
                 val_running += float(diffusion(clean_wav.unsqueeze(1), noisy_wav.unsqueeze(1)))
         val_loss = val_running / max(1, len(valid_loader))
 
-        print(f"★ Epoch {ep} | train_diffusion_loss={train_loss:.5g} | val_diffusion_loss={val_loss:.5g}")
+        # ── 新增：對齊官方 trainer.py 第190行，用 val_loss 驅動 lr scheduler ──
+        lr_scheduler.step(val_loss)
+        current_lr = optim.param_groups[0]['lr']
+
+        print(f"★ Epoch {ep} | train_diffusion_loss={train_loss:.5g} | "
+              f"val_diffusion_loss={val_loss:.5g} | lr={current_lr:.2e}")
         with open(args.log_csv, 'a', newline='') as f:
-            csv.writer(f).writerow([ep, train_loss, val_loss])
+            csv.writer(f).writerow([ep, train_loss, val_loss, current_lr])
 
         if val_loss < best_val:
             best_val = val_loss
             no_improve = 0
-            # 只存 denoiser (ConditionalModel) 的 state_dict，跟 param_count 腳本、
-            # 你們現有的 checkpoint 慣例（只存 model 本體）保持一致
+            # 只存 denoiser (ConditionalModel) 的 state_dict，跟你們現有的 checkpoint 慣例
+            # （只存 model 本體）保持一致；官方 test() 用的也是非 EMA 的原始權重，這裡對齊。
             torch.save(denoiser.state_dict(), args.model_save)
             print(f"✓ new best SDEMG baseline (val_diffusion_loss={best_val:.5g}) saved to {args.model_save}")
         else:

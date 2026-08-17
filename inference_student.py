@@ -241,7 +241,7 @@ model.eval()
 print(f"✔ model on {device} | fea={cfg['model'].get('fea','pha')}")
 
 # ---- Data ----
-X_all, y_all = torch.load(DATASET_PATH, map_location='cpu')
+X_all, y_all = torch.load(DATASET_PATH, map_location='cpu', mmap=True)
 N = X_all.size(0)
 print(f"✔ dataset size = {N}")
 if not (0 <= INDEX < N):

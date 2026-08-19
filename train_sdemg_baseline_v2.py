@@ -246,4 +246,3 @@ def _fit_length(wav, target_len):
 
 if __name__ == '__main__':
     main()
-

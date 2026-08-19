@@ -1,0 +1,7 @@
+# Copy this file to config/local_cfg.yaml and replace the example paths.
+
+ECG_corpus_dir: /path/to/mit-bih-normal-sinus-rhythm-database
+ECG_storage_dir: /path/to/processed/ecg
+
+EMG_corpus_dir: /path/to/ninapro-db2
+sEMG_dataset_dir: /path/to/processed/semg

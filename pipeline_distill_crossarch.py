@@ -6,6 +6,14 @@
 #   --noise_std_start / --noise_std_end / --noise_schedule : 控制噪聲衰減
 #   --layer_curriculum : 啟用層級課程，逐步加入更深層的 teacher 特徵
 #   Teacher Trajectory 模式仍保留（需 --trajectory + checkpoint 列表）
+#   --schedule_epochs : 【本次新增】把「alpha/noise/layer curriculum 排程長度」
+#                        跟「實際訓練總 epoch 數」拆開。預設等於 --epochs（完全
+#                        向下相容，不影響任何既有跑法）。當你想讓模型有更多時間
+#                        收斂、又不想打亂已驗證過的排程節奏時，把 --epochs 加大、
+#                        --schedule_epochs 維持原本驗證過的值（例如 60），排程會
+#                        照原節奏在 schedule_epochs 走完，之後的 epoch 全部沿用
+#                        排程終點設定（alpha=0、noise=0、teacher 層數全開）繼續
+#                        訓練，直到 early stopping 或撞到 --epochs 上限。
 # ────────────────────────────────────────────────────
 import os, sys, csv, argparse
 import yaml
@@ -47,9 +55,24 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
                                 noise_std_start=0.5,
                                 noise_std_end=0.0,
                                 noise_schedule='linear',
-                                use_layer_curriculum=False):
+                                use_layer_curriculum=False,
+                                # 【本次新增】排程長度跟訓練總長度拆開；
+                                # None 時自動 fallback 成 total_epochs（向下相容）
+                                schedule_epochs=None):
     if resp_weights is None:
         resp_weights = {"mask": 1.0, "mag": 1.0, "pha": 1.0, "com": 1.0}
+
+    # 【本次新增】schedule_epochs 沒指定時，行為跟修改前完全一樣
+    if schedule_epochs is None:
+        schedule_epochs = total_epochs
+    if schedule_epochs > total_epochs:
+        print(f"[warning] --schedule_epochs ({schedule_epochs}) > --epochs ({total_epochs})，"
+              f"排程永遠走不完，自動裁切成 {total_epochs}")
+        schedule_epochs = total_epochs
+    if schedule_epochs != total_epochs:
+        print(f"[Schedule] 排程長度={schedule_epochs} epoch，訓練總長度={total_epochs} epoch。"
+              f"epoch > {schedule_epochs} 之後，alpha/noise/layer curriculum 全部凍結在排程終點值，"
+              f"純粹用該終點設定繼續訓練（不會再變化）。")
 
     device = auto_select_gpu()
 
@@ -60,7 +83,7 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
     if not no_kd:
         teacher = SSEMGNet(teacher_cfg).to(device)
         if use_trajectory and teacher_ckpt_list is not None:
-            teacher_state_dicts = [torch.load(p, map_location='cpu') for p in teacher_ckpt_list]
+            teacher_state_dicts = [torch.load(p, map_location='cpu', mmap=True) for p in teacher_ckpt_list]
             print(f"[Trajectory] Loaded {len(teacher_state_dicts)} teacher checkpoints.")
         else:
             teacher.load_state_dict(torch.load(teacher_weights_path, map_location=device))
@@ -102,14 +125,14 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
 
     X_tr, y_tr = load_dataset('train', data_root)
     X_va, y_va = load_dataset('valid', data_root)
-    num_workers = max(0, (os.cpu_count() or 0) // 2)
+    num_workers = 0
     use_pin = (device.type == 'cuda')
 
     train_loader = DataLoader(TensorDataset(y_tr, X_tr), batch_size=batch_size, shuffle=True,
-                              drop_last=True, num_workers=num_workers, pin_memory=use_pin,
+                              drop_last=True, num_workers=0, pin_memory=use_pin,
                               persistent_workers=(num_workers > 0))
     valid_loader = DataLoader(TensorDataset(y_va, X_va), batch_size=batch_size, shuffle=False,
-                              drop_last=False, num_workers=num_workers, pin_memory=use_pin,
+                              drop_last=False, num_workers=0, pin_memory=use_pin,
                               persistent_workers=(num_workers > 0))
 
     os.makedirs(os.path.dirname(model_save), exist_ok=True)
@@ -134,9 +157,14 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
         running_info = {"resp_mask": 0.0, "resp_mag": 0.0, "resp_pha": 0.0,
                         "resp_com": 0.0, "feat_loss": 0.0, "rel_loss": 0.0}
 
+        # 【本次修改】排程用的「有效 epoch」封頂在 schedule_epochs，
+        # 超過之後就一直固定用 schedule_epochs 那個值去算，
+        # 等同於凍結在排程終點（alpha=0、noise=noise_std_end、layer curriculum 全開）。
+        sched_ep = min(ep, schedule_epochs)
+
         # ── 計算當前 noise_std ──
         if use_feature_noise:
-            cur_noise_std = get_noise_std(ep, total_epochs, noise_std_start,
+            cur_noise_std = get_noise_std(sched_ep, schedule_epochs, noise_std_start,
                                           noise_std_end, noise_schedule)
         else:
             cur_noise_std = 0.0
@@ -144,7 +172,7 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
         # ── 計算當前層級對齊索引 ──
         if use_layer_curriculum:
             all_layers = list(range(teacher_total_layers))
-            cur_teacher_indices = get_layer_curriculum_indices(ep, total_epochs, all_layers)
+            cur_teacher_indices = get_layer_curriculum_indices(sched_ep, schedule_epochs, all_layers)
         else:
             cur_teacher_indices = teacher_layer_selection
 
@@ -189,7 +217,7 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
                     info = {}
             elif use_trajectory and teacher_state_dicts is not None:
                 active_idx = get_trajectory_active_indices(
-                    ep, total_epochs, len(teacher_state_dicts),
+                    sched_ep, schedule_epochs, len(teacher_state_dicts),
                     mode=trajectory_curriculum
                 )
                 traj_kd, _ = compute_trajectory_kd_batch(
@@ -207,7 +235,7 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
                     device=device,
                     noise_std=cur_noise_std)
                 if kd_weight_mode == 'annealed':
-                    alpha = annealed_alpha(ep, total_epochs,
+                    alpha = annealed_alpha(sched_ep, schedule_epochs,
                                            schedule=anneal_schedule, exp_k=anneal_exp_k)
                 else:
                     alpha = fixed_alpha
@@ -216,27 +244,45 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
                 info = {"kd_loss": float(kd_loss.detach()), "alpha": alpha, "noise_std": cur_noise_std}
             else:
                 # 傳統單一 teacher + 混合蒸餾
-                with torch.no_grad():
-                    teacher(clean_b, noisy_b)
+                # 【優化】排程已凍結在終點（sched_ep >= schedule_epochs）且 annealed alpha
+                # 已經衰減到 0 時，KD loss 對 total_loss 的貢獻恆為 0，這時完全不需要
+                # 再做 teacher forward + KD loss 計算，直接退化成純 GT loss 微調，
+                # 省下 phase 2（例如 61~150 epoch）整段的 teacher 推論成本。
+                # 只在 annealed 模式下判斷；fixed alpha 模式下 alpha 通常不為 0，維持原行為。
+                skip_kd_this_step = False
                 if kd_weight_mode == 'annealed':
-                    kd_loss, alpha, info = compute_kd_loss_annealed(
-                        student, teacher, epoch=ep, total_epochs=total_epochs, projector=projector,
-                        w_feature=w_feature, w_response=w_response,
-                        include_relation=include_relation, w_relation=w_relation,
-                        resp_weights=resp_weights, schedule=anneal_schedule, exp_k=anneal_exp_k,
-                        teacher_layer_selection=cur_teacher_indices,
-                        feature_layer_weights=feature_layer_weights,
-                        noise_std=cur_noise_std)
+                    alpha_probe = annealed_alpha(sched_ep, schedule_epochs,
+                                                 schedule=anneal_schedule, exp_k=anneal_exp_k)
+                    if sched_ep >= schedule_epochs and alpha_probe <= 1e-8:
+                        skip_kd_this_step = True
+
+                if skip_kd_this_step:
+                    total_loss = gt_loss
+                    kd_loss = torch.tensor(0.0, device=device)
+                    alpha = 0.0
+                    info = {}
                 else:
-                    kd_loss, alpha, info = compute_kd_loss(
-                        student, teacher, projector=projector, alpha=fixed_alpha,
-                        w_feature=w_feature, w_response=w_response,
-                        include_relation=include_relation, w_relation=w_relation,
-                        resp_weights=resp_weights,
-                        teacher_layer_selection=cur_teacher_indices,
-                        feature_layer_weights=feature_layer_weights,
-                        noise_std=cur_noise_std)
-                total_loss = (1.0 - alpha) * gt_loss + alpha * kd_loss
+                    with torch.no_grad():
+                        teacher(clean_b, noisy_b)
+                    if kd_weight_mode == 'annealed':
+                        kd_loss, alpha, info = compute_kd_loss_annealed(
+                            student, teacher, epoch=sched_ep, total_epochs=schedule_epochs, projector=projector,
+                            w_feature=w_feature, w_response=w_response,
+                            include_relation=include_relation, w_relation=w_relation,
+                            resp_weights=resp_weights, schedule=anneal_schedule, exp_k=anneal_exp_k,
+                            teacher_layer_selection=cur_teacher_indices,
+                            feature_layer_weights=feature_layer_weights,
+                            noise_std=cur_noise_std)
+                    else:
+                        kd_loss, alpha, info = compute_kd_loss(
+                            student, teacher, projector=projector, alpha=fixed_alpha,
+                            w_feature=w_feature, w_response=w_response,
+                            include_relation=include_relation, w_relation=w_relation,
+                            resp_weights=resp_weights,
+                            teacher_layer_selection=cur_teacher_indices,
+                            feature_layer_weights=feature_layer_weights,
+                            noise_std=cur_noise_std)
+                    total_loss = (1.0 - alpha) * gt_loss + alpha * kd_loss
 
             (total_loss / accum).backward()
 
@@ -312,6 +358,10 @@ if __name__ == '__main__':
     p.add_argument('--student_config', required=True)
     p.add_argument('--data_root', default='dataset')
     p.add_argument('--epochs', type=int, default=30)
+    p.add_argument('--schedule_epochs', type=int, default=None,
+                   help='alpha/noise/layer curriculum 排程長度；預設等於 --epochs（向下相容）。'
+                        '設成比 --epochs 小的值，可以讓排程照原節奏走完後，'
+                        '用排程終點設定繼續訓練，不影響已驗證過的排程動態。')
     p.add_argument('--batch_size', type=int, default=4)
     p.add_argument('--accum', type=int, default=4)
     p.add_argument('--no_kd', action='store_true')
@@ -394,5 +444,6 @@ if __name__ == '__main__':
         noise_std_end=args.noise_std_end,
         noise_schedule=args.noise_schedule,
         use_layer_curriculum=args.layer_curriculum,
-        patience=args.patience
+        patience=args.patience,
+        schedule_epochs=args.schedule_epochs
     )

@@ -144,6 +144,7 @@ p.add_argument('--bands', default='20,40,150')
 p.add_argument('--only-idxs', default='')
 p.add_argument('--no-csv', action='store_true')
 p.add_argument('--exp-alias', default='ssemgnet')
+p.add_argument('--snr_labels', default='', help='Path to test_snr_labels.json for SNR grouping')
 args = p.parse_args()
 
 CFG_PATH = args.config if os.path.isabs(args.config) else os.path.join(ROOT, args.config)
@@ -331,6 +332,25 @@ sum_metrics = {"SNRimp":0.,"RMSE":0.,"PRD(%)":0.,"RMSE_ARV":0.,
                "RMSE_MF(Hz)":0.,"RMSE_MeanF(Hz)":0.,"RMSE_MedianF(Hz)":0.,"RMSEM":0.}
 count_samples = 0
 
+# ===== 新增：讀取 SNR labels 與初始化統計字典 =====
+from collections import defaultdict
+snr_labels_map = {}
+if args.snr_labels and os.path.exists(args.snr_labels):
+    with open(args.snr_labels, 'r') as f:
+        loaded_json = json.load(f)
+        # 如果是字典 {"0": -14, "1": -12}
+        if isinstance(loaded_json, dict):
+            snr_labels_map = {int(k): int(v) for k, v in loaded_json.items()}
+        # 如果是陣列 [-14, -12, -10]
+        elif isinstance(loaded_json, list):
+            snr_labels_map = {idx: int(v) for idx, v in enumerate(loaded_json)}
+            
+    print(f"[info] Loaded SNR labels for {len(snr_labels_map)} samples.")
+    snr_sum_metrics = defaultdict(lambda: {"SNRimp":0.,"RMSE":0.,"PRD(%)":0.,"RMSE_ARV":0.,
+               "RMSE_MF(Hz)":0.,"RMSE_MeanF(Hz)":0.,"RMSE_MedianF(Hz)":0.,"RMSEM":0.})
+    snr_count = defaultdict(int)
+# ==================================================
+
 def _process_block(noisy_spec, clean_spec, st_idx, only_set_effective):
     global sum_metrics, count_samples
     with torch.no_grad():
@@ -367,6 +387,21 @@ def _process_block(noisy_spec, clean_spec, st_idx, only_set_effective):
             m_out=compute_metrics_tensor(Wc[j],Wd[j],Wn[j],cfg=cfg)
             m_in=compute_metrics_tensor(Wc[j],Wn[j],None,cfg=cfg)
             ms=_mask_stats(Mk[j],cfg,args.bands)
+            
+            # ===== 新增：累加每個 SNR 的成績 =====
+            if snr_labels_map and idx in snr_labels_map:
+                snr_val = snr_labels_map[idx]
+                snr_count[snr_val] += 1
+                snr_sum_metrics[snr_val]["SNRimp"] += float(m_out.get("SNRimp", m_out.get("SNR_IMP(dB)", 0.)))
+                snr_sum_metrics[snr_val]["RMSE"] += float(m_out["RMSE"])
+                snr_sum_metrics[snr_val]["PRD(%)"] += float(m_out.get("PRD(%)", 0.))
+                snr_sum_metrics[snr_val]["RMSE_ARV"] += float(m_out.get("RMSE_ARV", 0.))
+                snr_sum_metrics[snr_val]["RMSE_MF(Hz)"] += float(m_out["RMSE_MF(Hz)"])
+                snr_sum_metrics[snr_val]["RMSE_MeanF(Hz)"] += float(m_out.get("RMSE_MeanF(Hz)", 0.))
+                snr_sum_metrics[snr_val]["RMSE_MedianF(Hz)"] += float(m_out.get("RMSE_MedianF(Hz)", 0.))
+                snr_sum_metrics[snr_val]["RMSEM"] += float(m_out["RMSEM"])
+            # ===================================
+
             if writer:
                 writer.writerow([
                     idx,exp_name,int(use_mrstft),int(use_entropy),
@@ -405,6 +440,36 @@ if not args.only_idxs.strip():
     print("\n===== Test-set Average (SSEMG-Net) =====")
     for k,v in avg.items():
         print(f"  {k:25s}: {v:.4f}")
+
+    # ================= 新增：輸出分 SNR 結果與 CSV =================
+    if snr_labels_map and snr_count:
+        print("\n===== Per-SNR Average (SSEMG-Net) =====")
+        snr_avg_rows = []
+        for snr in sorted(snr_count.keys(), reverse=True):
+            n_s = snr_count[snr]
+            row = {"SNR": snr, "n": n_s}
+            row.update({k: v / max(1, n_s) for k, v in snr_sum_metrics[snr].items()})
+            snr_avg_rows.append(row)
+            print(f"  SNR={snr:>4} dB (n={n_s:4d}) | "
+                  f"SNRimp={row['SNRimp']:.4f}  RMSE={row['RMSE']:.4f}  "
+                  f"RMSE_MF={row['RMSE_MF(Hz)']:.4f}")
+
+        # 儲存 CSV (檔名自動處理，將你傳入的檔名結尾換成 _by_snr.csv)
+        if args.csv_out:
+            snr_csv_path = args.csv_out.replace(".csv", "_by_snr.csv") if args.csv_out.endswith(".csv") else args.csv_out + "_by_snr.csv"
+        else:
+            snr_csv_path = os.path.join(ROOT, 'analysis', f'{exp_name}_metrics_by_snr.csv')
+
+        os.makedirs(os.path.dirname(snr_csv_path) or '.', exist_ok=True)
+        with open(snr_csv_path, 'w', newline='') as f:
+            fieldnames = ["SNR", "n", "SNRimp", "RMSE", "PRD(%)", "RMSE_ARV",
+                          "RMSE_MF(Hz)", "RMSE_MeanF(Hz)", "RMSE_MedianF(Hz)", "RMSEM"]
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in snr_avg_rows:
+                writer.writerow(row)
+        print(f"\n[info] 每個 SNR 檔位的分數已存到 {snr_csv_path}")
+    # ===============================================================
 
 # ---- Plot ----
 from matplotlib import mlab

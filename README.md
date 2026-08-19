@@ -1,8 +1,8 @@
 # SSEMG-Net
 
-Official implementation of **SSEMG-Net: A Spectrogram-Based Mamba Network for Surface Electromyography Denoising**.
+Official implementation of **SSEMG-Net: A Spectrogram-Based Mamba Network for Surface Electromyography Denoising**, together with a cross-architecture knowledge distillation (KD) pipeline that compresses SSEMG-Net into a lightweight, CPU-deployable student model.
 
-SSEMG-Net removes ECG artifacts from surface electromyography signals using:
+SSEMG-Net (Teacher) removes ECG artifacts from surface electromyography signals using:
 
 - compressed magnitude and wrapped-phase spectrograms
 - time-frequency bidirectional Mamba blocks
@@ -10,17 +10,25 @@ SSEMG-Net removes ECG artifacts from surface electromyography signals using:
 - explicit phase estimation
 - time-domain, complex-domain, consistency, and multi-resolution STFT losses
 
+The Student model (`StudentSSEMGNet`) replaces the TF-Bi-Mamba backbone with depthwise separable, dilated convolutions, removing any dependency on `mamba_ssm` / CUDA / Triton so it can run on CPU-only devices, and is trained via knowledge distillation from the Teacher.
+
 ## Main files
 
 - `prepare_data.py`: NinaPro DB2 and ECG preprocessing, segmentation, and noisy-mixture generation
 - `convert.py`: waveform-to-spectrogram conversion
 - `make_dataset_spectrogram.py`: noisy-clean spectrogram pairing and tensor dataset construction
-- `MECG-E/models/SSEMGNet.py`: SSEMG-Net model architecture
-- `pipeline_spectrogram.py`: training pipeline
-- `inference_demo.py`: inference, evaluation, and visualization
+- `MECG-E/models/SSEMGNet.py`: SSEMG-Net (Teacher) model architecture
+- `MECG-E/models/StudentNet.py`: StudentSSEMGNet (Student) model architecture
+- `pipeline_spectrogram.py`: Teacher training pipeline
+- `pipeline_distill_crossarch.py`: cross-architecture knowledge distillation pipeline (trains the Student)
+- `distill_loss.py`: KD loss functions (Response / Feature / Relation), annealing and curriculum schedulers
+- `check_loss_balance.py`: sanity-checks whether KD loss terms are balanced
+- `inference_demo.py`: Teacher inference, evaluation, and visualization
+- `inference_student.py`: Student inference and evaluation
 - `spectrogram_utils.py`: STFT and inverse STFT utilities
 - `utils.py`: evaluation metrics
-- `config/config_spectrogram_v19_tt_mask.yaml`: SSEMG-Net paper configuration
+- `config/config_spectrogram_v19_tt_mask.yaml`: SSEMG-Net (Teacher) paper configuration
+- `config/config_student_crossarch.yaml`: Student model configuration
 - `config/local_cfg.example.yaml`: example dataset-path configuration
 
 ## Data
@@ -196,9 +204,56 @@ The evaluation reports:
 
 In this repository, `RMSE_MF(Hz)` denotes the error of **mean frequency**, defined as the spectral centroid.
 
+## 6. Knowledge distillation (train the Student)
+
+The Student (`StudentSSEMGNet`) is trained with a Teacher SSEMG-Net checkpoint frozen (`eval()`, no gradient updates), using the same train/valid/test tensor datasets built in step 3.
+
+Run:
+
+    python pipeline_distill_crossarch.py \
+        --teacher_config config/config_spectrogram_v19_tt_mask.yaml \
+        --teacher_weights <path/to/teacher_checkpoint.pth> \
+        --student_config config/config_student_crossarch.yaml \
+        --data_root dataset \
+        --epochs 60 \
+        --kd_weight_mode annealed --anneal_schedule cosine \
+        --w_resp_mask 3.5 --w_resp_mag 5.0 --w_resp_pha 0.3 --w_resp_com 2.3 \
+        --w_feature 0.3 \
+        --feature_noise --layer_curriculum \
+        --log_csv <path/to/log.csv> \
+        --model_save <path/to/student_checkpoint.pth>
+
+Key options:
+
+- `--kd_weight_mode {fixed,annealed}` and `--anneal_schedule {linear,cosine,exponential}`: control how the GT/KD weight α is scheduled over training
+- `--w_feature`, `--w_response`: weight of Feature-based and Response-based KD losses
+- `--w_resp_mask`, `--w_resp_mag`, `--w_resp_pha`, `--w_resp_com`: per-component weights of the Response KD loss (Mask, Magnitude, Phase, Complex)
+- `--include_relation` / `--w_relation`: enable Relation-based KD loss (self-similarity matrix across time/frequency)
+- `--feature_noise` / `--noise_std_start` / `--noise_std_end` / `--noise_schedule`: Feature Noise Annealing on the Teacher's target features
+- `--layer_curriculum`: progressively expand the set of Teacher layers used for Feature KD
+- `--two_stage` / `--two_stage_ratio`: hard-switch training into a Teacher-only representation stage followed by a Ground-Truth-only fine-tuning stage
+
+(Optional) check that the logged loss terms are on a comparable scale:
+
+    python check_loss_balance.py <path/to/log.csv> \
+        --w_mask 3.5 --w_mag 5.0 --w_pha 0.3 --w_com 2.3 --w_feature 0.3
+
+## 7. Evaluate the Student
+
+Run:
+
+    python inference_student.py \
+        --config config/config_student_crossarch.yaml \
+        --weights <path/to/student_checkpoint.pth> \
+        --dataset dataset/test_spectrogram.pt \
+        --csv-out <path/to/results.csv> \
+        --exp-alias "Student_KD"
+
+`inference_demo.py` also works with a Student checkpoint and config for single-sample visualization, the same as step 5.
+
 ## Repository workflow
 
-The complete preprocessing and training pipeline is:
+The complete preprocessing, training, and distillation pipeline is:
 
     Raw NinaPro DB2 and ECG data
         ↓
@@ -216,9 +271,13 @@ The complete preprocessing and training pipeline is:
         ↓
     pipeline_spectrogram.py
         ↓
-    SSEMG-Net checkpoint
+    SSEMG-Net (Teacher) checkpoint
         ↓
-    inference_demo.py
+    pipeline_distill_crossarch.py  (Teacher frozen, KD training)
+        ↓
+    StudentSSEMGNet (Student) checkpoint
+        ↓
+    inference_demo.py / inference_student.py
         ↓
     Evaluation metrics and visualizations
 
@@ -239,4 +298,8 @@ The released environment uses:
 - `triton==2.3.1`
 
 Linux, an NVIDIA GPU, and a compatible CUDA toolkit are required for the
-CUDA-accelerated Mamba implementation.
+CUDA-accelerated Mamba implementation used by the **Teacher**.
+
+The **Student** (`StudentSSEMGNet`) uses only standard PyTorch convolutions and does
+not import `mamba_ssm` / `causal-conv1d` / `triton`, so once a Student checkpoint is
+trained, `inference_student.py` can run on a CPU-only machine.

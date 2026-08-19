@@ -24,7 +24,7 @@ def load_dataset(split, data_root):
     讀取 {train|valid|test}_spectrogram.pt，回傳 (X, y)。
     期望 shape: X, y ∈ [N, 2, F, T]
     """
-    f = torch.load(os.path.join(data_root, f'{split}_spectrogram.pt'), map_location='cpu')
+    f = torch.load(os.path.join(data_root, f'{split}_spectrogram.pt'), map_location='cpu', mmap=True)
     X, y = f[0], f[1]  # X=noisy , y=clean
     assert X.ndim == 4 and y.ndim == 4 and X.shape[1] == 2 and y.shape[1] == 2, \
         f"Expect X,y as [N,2,F,T], got X={tuple(X.shape)}, y={tuple(y.shape)}"

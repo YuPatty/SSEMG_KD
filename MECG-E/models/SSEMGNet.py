@@ -19,6 +19,13 @@ from mamba_ssm.modules.mamba_simple import Mamba
 import mamba_ssm.modules.mamba_simple as _mamba_simple_module
 from mamba_ssm.ops.triton.layer_norm import RMSNorm as _TritonRMSNorm
 
+# 在任何 patch 發生之前，先保留「原始」的 CUDA 加速函式參照。
+# set_model_device_mode() 之後會用這些原始參照，依「實際要跑的裝置」
+# 動態切換，而不是只看 torch.cuda.is_available()（機器層級的判斷）。
+_ORIG_CAUSAL_CONV1D_FN = getattr(_mamba_simple_module, "causal_conv1d_fn", None)
+_ORIG_CAUSAL_CONV1D_UPDATE = getattr(_mamba_simple_module, "causal_conv1d_update", None)
+_ORIG_SELECTIVE_SCAN_FN = getattr(_mamba_simple_module, "selective_scan_fn", None)
+
 # ── CPU 相容性修補（第二處，比 RMSNorm 更隱蔽）──────────────────
 # 實測發現：即使 Mamba(..., use_fast_path=False)，mamba_simple.py 內部呼叫
 # causal_conv1d_fn 的判斷邏輯，並不是看 use_fast_path，而是獨立判斷
@@ -71,6 +78,65 @@ def _get_norm_cls(device_type: str):
     """依裝置自動選擇：CUDA 用原本的 Triton RMSNorm（不影響既有 GPU 效能），
     CPU 用上面的純 PyTorch 版本（唯一能在 CPU 執行的路徑）。"""
     return _TritonRMSNorm if device_type == 'cuda' else _PlainRMSNorm
+
+
+def set_model_device_mode(model, device):
+    """
+    在 model.to(device) 之後呼叫，依「這次實際要用哪個裝置跑」重新設定
+    Mamba 內部的 fast-path 開關（causal_conv1d_fn / selective_scan_fn /
+    RMSNorm 實作 / Mamba.use_fast_path），不再依賴 torch.cuda.is_available()
+    這個「機器有沒有裝 CUDA」的全域判斷。
+
+    背景：原本 MambaBlock.__init__ 是在「建構模型的當下」用
+    torch.cuda.is_available() 決定要不要用 fast path，這在「同一個模型
+    只會在單一裝置上用一輩子」的情境下沒問題；但如果你在有 GPU 的機器上
+    想額外測 CPU 延遲（例如 measure_latency.py --device cpu），機器本身
+    torch.cuda.is_available() 仍是 True，模型會被裝上 Triton kernel，
+    再把 tensor 搬到 CPU 就會直接崩潰。這個函式讓你可以在跑完
+    model.to(device) 之後，明確依實際裝置重新配置一次。
+
+    ⚠️ 這個函式不會被任何訓練程式碼呼叫，只有 measure_latency.py 這類
+    「明確指定裝置做基準測試」的腳本需要呼叫它，因此完全不影響訓練結果。
+
+    回傳值就是傳入的 model（方便串接呼叫）。
+    """
+    device = torch.device(device)
+    use_cuda = (device.type == 'cuda')
+
+    # 1. 全域函式參照：依實際裝置在原始版本／CPU 相容版本之間切換
+    if use_cuda and _ORIG_CAUSAL_CONV1D_FN is not None:
+        _mamba_simple_module.causal_conv1d_fn = _ORIG_CAUSAL_CONV1D_FN
+        _mamba_simple_module.causal_conv1d_update = _ORIG_CAUSAL_CONV1D_UPDATE
+    else:
+        _mamba_simple_module.causal_conv1d_fn = None
+        _mamba_simple_module.causal_conv1d_update = None
+
+    if use_cuda and _ORIG_SELECTIVE_SCAN_FN is not None:
+        _mamba_simple_module.selective_scan_fn = _ORIG_SELECTIVE_SCAN_FN
+    else:
+        try:
+            from mamba_ssm.ops.selective_scan_interface import selective_scan_ref
+            _mamba_simple_module.selective_scan_fn = selective_scan_ref
+        except ImportError:
+            pass
+
+    # 2. 每個 Mamba mixer 的 use_fast_path，跟每個 Block 的 RMSNorm 實作
+    for module in model.modules():
+        if isinstance(module, Mamba):
+            module.use_fast_path = use_cuda
+
+        if isinstance(module, Block) and hasattr(module, "norm"):
+            target_cls = _TritonRMSNorm if use_cuda else _PlainRMSNorm
+            old_norm = module.norm
+            if not isinstance(old_norm, target_cls) and hasattr(old_norm, "weight"):
+                hidden_size = old_norm.weight.shape[0]
+                eps = getattr(old_norm, "eps", 1e-5)
+                new_norm = target_cls(hidden_size, eps=eps)
+                new_norm.weight.data.copy_(old_norm.weight.data)
+                new_norm = new_norm.to(device=old_norm.weight.device, dtype=old_norm.weight.dtype)
+                module.norm = new_norm
+
+    return model.to(device)
 
 
 RMSNorm = _TritonRMSNorm  # 保留原本的名稱以維持向後相容（其他地方若直接 import RMSNorm 仍可用）
@@ -638,12 +704,20 @@ class SSEMGNet(nn.Module):
         
         return loss_gen_all
 
-    def forward_spectrogram(self, clean_spec, noisy_spec):
+    def infer_spectrogram(self, noisy_spec):
         """
-        clean_spec, noisy_spec: [B, 2, F, T]
-        依 config['model']['fea']：
-          - 'pha'：通道 2 表示 [mag(已壓縮), pha]
-          - 'cpx'：通道 2 表示 [real, imag]（對應壓縮後的 mag*cos, mag*sin）
+        真正的推論路徑：只需要 noisy_spec，不需要 clean_spec，也不算任何 loss。
+        跟部署時（麥克風只有 noisy 訊號）完全一致的計算圖。
+
+        這段程式碼跟 forward_spectrogram 原本的 Step 1~5 逐行相同，只是被抽出來
+        成獨立方法，這樣量推論延遲時可以只呼叫這裡，不會連帶跑到後面只有訓練
+        才需要的 loss 計算（clean 頻譜比較、consistency loss 的 complex_decoder
+        重複呼叫、ISTFT 波形轉換等）。forward_spectrogram 內部也是呼叫這個方法
+        取得結果後，再接著算 loss，所以訓練的數值結果完全不變。
+
+        noisy_spec: [B, 2, F, T]
+        回傳 dict，包含 self.last_outputs 的四項，外加 forward_spectrogram
+        接下來算 loss 時還會用到的中介張量。
         """
 
         # --------- helper: ISTFT 一律用 float32 -----------
@@ -658,7 +732,6 @@ class SSEMGNet(nn.Module):
 
         # Step 1: 統一成 [B, 2, T, F]
         x_noisy  = noisy_spec.permute(0, 1, 3, 2).contiguous()   # [B, 2, T, F]
-        x_clean  = clean_spec.permute(0, 1, 3, 2).contiguous()   # [B, 2, T, F]
 
         # ---- 一次性 debug（只在第一個 batch 的第一次 forward 印）----
         if not hasattr(self, "_debug_printed"):
@@ -668,7 +741,7 @@ class SSEMGNet(nn.Module):
                 neg_ratio = (a < 0).float().mean().item()
                 pha_max   = b.abs().max().item()
                 print(f"[debug] x_noisy ch0 neg_ratio={neg_ratio:.3f} (mag應該≈0)， ch1 |max|={pha_max:.3f} (pha應該≈3.14)")
-                print(f"[debug] expect fea='{self.fea}' ; x_noisy shape={tuple(x_noisy.shape)} , x_clean shape={tuple(x_clean.shape)}")
+                print(f"[debug] expect fea='{self.fea}' ; x_noisy shape={tuple(x_noisy.shape)}")
 
         # Step 2: 從 noisy 取出 mag/pha 或 real/imag（皆為 [B, T, F]）
         # 若 fea='pha' 但 ch0 有大量負值、或 ch1 振幅遠超出 pi，視為 (real,imag)，自動轉成 (mag,pha)
@@ -743,6 +816,49 @@ class SSEMGNet(nn.Module):
                 mag_g_FT * torch.cos(pha_g),
                 mag_g_FT * torch.sin(pha_g)
             ], dim=-1)                                                              # [B, F, T, 2]
+
+        self.last_outputs = {
+            "mask":     mask_out,     # [B, 1, T, F]
+            "mag_g_FT": mag_g_FT,     # [B, F, T]
+            "pha_g":    pha_g,        # [B, F, T]
+            "com_g":    com_g,        # [B, F, T, 2]
+        }
+
+        return {
+            "mask_out": mask_out,
+            "mag_g_FT": mag_g_FT,
+            "mag_noisy_FT": mag_noisy_FT,
+            "pha_FT": pha_FT,
+            "pha_g": pha_g,
+            "com_g": com_g,
+            "x_feat": x_feat,
+            "mask_entropy": mask_entropy,
+            "istft32": istft32,
+        }
+
+    def forward_spectrogram(self, clean_spec, noisy_spec):
+        """
+        clean_spec, noisy_spec: [B, 2, F, T]
+        依 config['model']['fea']：
+          - 'pha'：通道 2 表示 [mag(已壓縮), pha]
+          - 'cpx'：通道 2 表示 [real, imag]（對應壓縮後的 mag*cos, mag*sin）
+
+        訓練用（需要 clean_spec 來算 loss）。純推論（不需要 clean_spec、
+        不算 loss）請改呼叫 infer_spectrogram()。
+        """
+        # Step 1~5：跟部署時完全相同的純推論路徑
+        _out = self.infer_spectrogram(noisy_spec)
+        mask_out     = _out["mask_out"]
+        mag_g_FT     = _out["mag_g_FT"]
+        mag_noisy_FT = _out["mag_noisy_FT"]
+        pha_FT       = _out["pha_FT"]
+        pha_g        = _out["pha_g"]
+        com_g        = _out["com_g"]
+        x_feat       = _out["x_feat"]
+        mask_entropy = _out["mask_entropy"]
+        istft32      = _out["istft32"]
+
+        x_clean  = clean_spec.permute(0, 1, 3, 2).contiguous()   # [B, 2, T, F]
 
         # === 準備 clean 的頻譜（[B, F, T, 2]） ===
         if self.fea == 'cpx':
@@ -863,4 +979,3 @@ class SSEMGNet(nn.Module):
 
 # Backward-compatible alias for legacy training scripts/checkpoints.
 MECGE = SSEMGNet
-

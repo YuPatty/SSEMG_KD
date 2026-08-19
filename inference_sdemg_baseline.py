@@ -249,11 +249,9 @@ def main():
             noisy_wav = spec_to_wav(noisy_spec, n_fft, hop_size, win_size, compress_factor)
             orig_len = int(min(clean_wav.size(-1), noisy_wav.size(-1)))
 
-            noisy_wav_fit = _fit_length(noisy_wav, args.seq_length)
-            pred_wav = diffusion.denoise(noisy_wav_fit.unsqueeze(1),
-                                          denoise_timesteps=args.denoise_timesteps).squeeze(1)
-
+            noisy_wav_fit = _fit_length(noisy_wav, args.seq_length)            
             minL = int(min(orig_len, pred_wav.size(-1)))
+
             clean_wav = clean_wav[:, :minL]
             pred_wav = pred_wav[:, :minL]
             noisy_wav = noisy_wav[:, :minL]

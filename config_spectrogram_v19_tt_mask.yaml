@@ -1,0 +1,57 @@
+# /data/member1/user_howardshih/shihsemg/config/config_spectrogram_v19_tt_mask.yaml
+
+exp:
+  name: v19_tt_mask
+train:
+  epochs: 30
+  batch_size: 4
+  accum: 4
+  lr: 3.0e-4
+  clip_grad: 5.0
+  prefetch_factor: 4
+  dbg_every: 2000
+
+model:
+  fea: "pha"
+  norm: False
+  fmamba: True
+  dense_channel: 64
+  compress_factor: 0.5
+  num_tscblocks: 4
+  sampling_rate: 1000
+  n_fft: 512
+  hop_size: 128
+  win_size: 512
+  beta: 1.0
+  loss_fn: "time+com+con"
+  mr_max_len: 9500
+  mask_hp_cut_hz: 150.0
+  loss_weights:
+    time: 0.25
+    com : 0.40
+    con : 0.25
+    mr  : 0.08
+    H   : 0.01
+  # 啟用 GroupNorm 來穩定 early-epoch 收斂
+  use_gn: True      # False → 沿用 InstanceNorm2d
+  gn_groups: 8      # 64ch 配 8 組 (每組 8ch)
+  # learnable-sigmoid 的 L2 正則強度（training loop 會讀取）
+  lsig_L2: 5.0e-5
+
+# --------------------------------------------------
+ablation:
+  use_mrstft:   True    
+  use_entropy:  True   
+# --------------------------------------------------
+
+
+input_channels: 2
+input_freq_bins: 257
+input_time_bins: 79
+
+metrics:
+  sampling_rate:    1000   
+  n_fft:            256
+  hop_size:         32
+  win_size:         128
+  segment_sec:      1

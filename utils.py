@@ -215,10 +215,12 @@ def compute_metrics_tensor(clean, denoised, noisy=None, cfg=None, segment_size=N
 
     snr_global = 10 * np.log10((total_signal_pow + eps) / (total_noise_pow + eps))
     rmse_global = np.sqrt(total_noise_pow / max(1, total_num_pts))
-
+    prd_global = np.sqrt(total_noise_pow / (total_signal_pow + eps)) * 100
+    
     out = {
         "SNR":   float(snr_global),
         "RMSE":  float(rmse_global),
+        "PRD(%)": float(prd_global),   # ← 補這行
         "RMSEM": float(np.mean(rmsem_list)),
     }
     if rmse_arv_list:

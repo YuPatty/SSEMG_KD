@@ -1,7 +1,4 @@
-# ────────────────────────────────────────────────────
-# pipeline_distill_crossarch.py
-# 跨架構版：Teacher = SSEMGNet (TF-Bi-Mamba), Student = StudentSSEMGNet (純 CNN)
-# ────────────────────────────────────────────────────
+# pipeline_distill_crossarch.py — Teacher = SSEMGNet (TF-Bi-Mamba), Student = StudentSSEMGNet (純 CNN)
 import os, sys, csv, argparse
 import yaml
 import torch
@@ -42,7 +39,7 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
                                 noise_std_end=0.0,
                                 noise_schedule='linear',
                                 use_layer_curriculum=False,
-                                schedule_epochs=None,
+                                schedule_epochs=None,   # None → fallback to total_epochs
                                 use_similarity=False,
                                 w_similarity=1.0,
                                 similarity_student_idx=-1,
@@ -57,7 +54,7 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
     if resp_weights is None:
         resp_weights = {"mask": 1.0, "mag": 1.0, "pha": 1.0, "com": 1.0}
 
-                                  
+    # 固定隨機種子（須放在任何模型/DataLoader 建立之前）
     if seed is not None:
         import random
         import numpy as np
@@ -80,12 +77,13 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
 
     device = auto_select_gpu()
 
-
+    # cuDNN autotuning（不影響計算結果，只挑最快的 kernel 實作）
     if device.type == 'cuda':
         torch.backends.cudnn.benchmark = cudnn_benchmark
         if cudnn_benchmark:
             print("[speed] 已啟用 torch.backends.cudnn.benchmark=True（固定 shape 下自動挑最快 kernel）")
 
+    # AMP 混合精度（FP16 forward + FP32 GradScaler）
     amp_dtype = torch.float16
     scaler = torch.cuda.amp.GradScaler(enabled=(use_amp and device.type == 'cuda'))
     if use_amp:
@@ -141,6 +139,7 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
         optim, mode='min', factor=0.5, patience=2, min_lr=1e-6
     )
 
+    # resume_path 預設與 model_save 同目錄，檔名不同（避免與純 state_dict 混淆）
     if resume_path is None:
         base = model_save[:-4] if model_save.endswith('.pth') else model_save
         resume_path = base + '.resume_state.pth'
@@ -163,7 +162,7 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
         best_val = state['best_val']
         no_improve = state['no_improve']
         start_epoch = state['epoch'] + 1
-
+        # 還原 RNG 狀態以接續訓練軌跡
         if 'torch_rng_state' in state:
             torch.set_rng_state(state['torch_rng_state'].cpu())
         if device.type == 'cuda' and 'cuda_rng_state' in state and state['cuda_rng_state'] is not None:
@@ -182,7 +181,6 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
 
     X_tr, y_tr = load_dataset('train', data_root)
     X_va, y_va = load_dataset('valid', data_root)
- 
     use_pin = (device.type == 'cuda')
 
     train_loader = DataLoader(TensorDataset(y_tr, X_tr), batch_size=batch_size, shuffle=True,
@@ -201,6 +199,7 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
         os.makedirs(swa_dir, exist_ok=True)
         print(f"[SWA] 排程走完後每個 epoch 的 checkpoint 會存到 {swa_dir}/")
 
+    # resume 時用 append 模式接續寫，避免清空既有訓練曲線
     if resumed:
         log_csv_mode = 'a'
         print(f"[resume] {log_csv} 用 append 模式接續寫入，不會清空先前紀錄")
@@ -214,6 +213,7 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
                  'noise_std', 'sim_loss']
             )
 
+    # 預先取得 teacher 總層數，供層級課程使用
     teacher_total_layers = teacher_cfg['model']['num_tscblocks'] if not no_kd else 4
 
     if resumed and no_improve >= patience:
@@ -230,6 +230,7 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
                         "resp_com": 0.0, "feat_loss": 0.0, "rel_loss": 0.0,
                         "sim_loss": 0.0}
 
+        # 排程用的有效 epoch 封頂在 schedule_epochs（超過後凍結在排程終點）
         sched_ep = min(ep, schedule_epochs)
 
         # ── 計算當前 noise_std ──
@@ -239,6 +240,7 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
         else:
             cur_noise_std = 0.0
 
+        # ── 計算當前層級對齊索引 ──
         if use_layer_curriculum:
             all_layers = list(range(teacher_total_layers))
             cur_teacher_indices = get_layer_curriculum_indices(sched_ep, schedule_epochs, all_layers)
@@ -316,6 +318,7 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
                     total_loss = (1.0 - alpha) * gt_loss + alpha * kd_loss
                     info = {"kd_loss": float(kd_loss.detach()), "alpha": alpha, "noise_std": cur_noise_std}
                 else:
+                    # 排程結束且 alpha=0 時跳過 teacher forward，退化成純 GT loss 微調
                     skip_kd_this_step = False
                     if kd_weight_mode == 'annealed':
                         alpha_probe = annealed_alpha(sched_ep, schedule_epochs,
@@ -357,11 +360,11 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
                                 similarity_teacher_idx=similarity_teacher_idx)
                         total_loss = (1.0 - alpha) * gt_loss + alpha * kd_loss
 
+            # AMP 下用 GradScaler 縮放 loss 再 backward，避免 FP16 梯度 underflow
             scaler.scale(total_loss / accum).backward()
 
             if step % accum == 0 or step == len(train_loader):
-                # clip_grad_norm_ 之前要先 unscale_，否則量到的梯度範數是被
-                # scaler 放大過的，clip 的門檻會不對。
+                # clip 前需先 unscale_，否則梯度範數被 scaler 放大過
                 scaler.unscale_(optim)
                 torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=clip_grad)
                 scaler.step(optim)
@@ -425,10 +428,12 @@ def run_crossarch_distillation(teacher_cfg, student_cfg, teacher_weights_path, d
             else:
                 print(f"ℹ [Phase 1] val_gt plateau expected")
 
+        # 排程結束後每 epoch 額外存一份 checkpoint，供訓練後做 SWA 平均
         if use_swa and sched_ep >= schedule_epochs:
             swa_ckpt_path = os.path.join(swa_dir, f"epoch{ep}_valgt{val_gt:.5f}.pth")
             torch.save(student.state_dict(), swa_ckpt_path)
 
+        # 每 epoch 存一份完整訓練狀態供 resume 用（覆蓋寫，只留最新一份）
         resume_state = {
             'epoch': ep,
             'student_state_dict': student.state_dict(),
@@ -491,6 +496,8 @@ if __name__ == '__main__':
     p.add_argument('--two_stage', action='store_true')
     p.add_argument('--two_stage_ratio', type=float, default=0.7)
     p.add_argument('--patience', type=int, default=10, help='early stopping patience')
+
+    # SWA checkpoint 收集
     p.add_argument('--swa', action='store_true',
                    help='排程走完後（sched_ep >= schedule_epochs）每個 epoch 額外存一份 '
                         'checkpoint 到 --swa_dir，供訓練結束後做權重平均。不影響原本 '
@@ -498,7 +505,6 @@ if __name__ == '__main__':
     p.add_argument('--swa_dir', default=None,
                    help='SWA checkpoint 存放資料夾，預設是 model_save 去掉副檔名 + "_swa_ckpts"')
 
-    # Trajectory 參數（原功能保留）
     p.add_argument('--trajectory', action='store_true')
     p.add_argument('--teacher_ckpt_list', nargs='+', default=None)
     p.add_argument('--trajectory_weights', nargs='+', type=float, default=None)
@@ -512,8 +518,11 @@ if __name__ == '__main__':
                    help='最終噪聲標準差（預設 0.0）')
     p.add_argument('--noise_schedule', choices=['linear', 'cosine', 'exponential'], default='linear',
                    help='噪聲衰減曲線（同 alpha 排程）')
+
     p.add_argument('--layer_curriculum', action='store_true',
                    help='啟用層級課程：前期只用淺層 teacher，逐步加入深層')
+
+    # Similarity-Preserving KD
     p.add_argument('--similarity_preserving', action='store_true',
                    help='啟用 Similarity-Preserving KD（batch 內樣本兩兩相似度矩陣對齊，'
                         '不需要 FeatureProjector、不受 block 數限制）')
@@ -527,6 +536,7 @@ if __name__ == '__main__':
                    help='固定 random/numpy/torch 的隨機種子，讓重跑盡量逼近同一次訓練軌跡。'
                         '不指定時完全不設 seed(向下相容)。GPU 上某些 cuDNN kernel 本身非'
                         '完全確定性，設了 seed 只能大幅縮小、不能保證 100% 消除重跑間的差異。')
+
     p.add_argument('--resume', action='store_true',
                    help='啟用後，如果 --resume_path 指定的檔案存在，會從裡面還原 model/'
                         'optimizer/scheduler/epoch/best_val/no_improve/RNG 狀態接續訓練；'
@@ -536,6 +546,8 @@ if __name__ == '__main__':
     p.add_argument('--resume_path', default=None,
                    help='resume 用的完整訓練狀態檔案路徑；不指定時預設是 '
                         '--model_save 去掉副檔名 + ".resume_state.pth"')
+
+    # 加速選項（不改變計算結果）
     p.add_argument('--use_amp', action='store_true',
                    help='啟用 AMP 混合精度訓練 (FP16 autocast + GradScaler)。'
                         '不改變計算圖或 batch 組成，只是數值精度略有誤差，'

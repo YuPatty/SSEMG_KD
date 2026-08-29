@@ -21,14 +21,15 @@ The Student model (`StudentSSEMGNet`) replaces the TF-Bi-Mamba backbone with dep
 - `MECG-E/models/StudentNet.py`: StudentSSEMGNet (Student) model architecture
 - `pipeline_spectrogram.py`: Teacher training pipeline
 - `pipeline_distill_crossarch.py`: cross-architecture knowledge distillation pipeline (trains the Student)
-- `distill_loss.py`: KD loss functions (Response / Feature / Relation), annealing and curriculum schedulers
+- `distill_loss.py`: KD loss functions, annealing and curriculum schedulers
 - `check_loss_balance.py`: sanity-checks whether KD loss terms are balanced
 - `inference_demo.py`: Teacher inference, evaluation, and visualization
 - `inference_student.py`: Student inference and evaluation
 - `spectrogram_utils.py`: STFT and inverse STFT utilities
 - `utils.py`: evaluation metrics
 - `config/config_spectrogram_v19_tt_mask.yaml`: SSEMG-Net (Teacher) paper configuration
-- `config/config_student_crossarch.yaml`: Student model configuration
+- `config/config_student_crossarch.yaml`: Student model configuration (32ch, 2 TSConvBlocks)
+- `config/student_16ch_1blk.yaml`: edge-deployment Student configuration (16ch, 1 TSConvBlock — used for the reported result)
 - `config/local_cfg.example.yaml`: example dataset-path configuration
 
 ## Data
@@ -208,36 +209,44 @@ In this repository, `RMSE_MF(Hz)` denotes the error of **mean frequency**, defin
 
 The Student (`StudentSSEMGNet`) is trained with a Teacher SSEMG-Net checkpoint frozen (`eval()`, no gradient updates), using the same train/valid/test tensor datasets built in step 3.
 
-Run:
+The command below reproduces the reported edge-deployment result (16ch/1blk, Response KD only, SNRimp ≈ 20.05 dB):
 
     python pipeline_distill_crossarch.py \
         --teacher_config config/config_spectrogram_v19_tt_mask.yaml \
         --teacher_weights <path/to/teacher_checkpoint.pth> \
-        --student_config config/config_student_crossarch.yaml \
+        --student_config config/student_16ch_1blk.yaml \
         --data_root dataset \
-        --epochs 60 \
-        --kd_weight_mode annealed --anneal_schedule cosine \
+        --epochs 150 \
+        --kd_weight_mode annealed --anneal_schedule linear \
         --w_resp_mask 3.5 --w_resp_mag 5.0 --w_resp_pha 0.3 --w_resp_com 2.3 \
-        --w_feature 0.3 \
-        --feature_noise --layer_curriculum \
-        --log_csv <path/to/log.csv> \
-        --model_save <path/to/student_checkpoint.pth>
+        --w_feature 0 \
+        --patience 10 \
+        --log_csv log_student_16ch_1blk_respKD.csv \
+        --model_save model_weight/student_16ch_1blk_respKD.pth
+
+Training stops via early stopping well before reaching `--epochs`; `--epochs` only sets the upper bound and the length of the α annealing schedule (see `--schedule_epochs` below to decouple the two).
 
 Key options:
 
 - `--kd_weight_mode {fixed,annealed}` and `--anneal_schedule {linear,cosine,exponential}`: control how the GT/KD weight α is scheduled over training
+- `--schedule_epochs`: decouple the α / noise / layer-curriculum schedule length from the actual training epoch budget (`--epochs`). Defaults to `--epochs` if unset (fully backward compatible) — set this when you want to extend training beyond a schedule that was already validated, without changing its pace
 - `--w_feature`, `--w_response`: weight of Feature-based and Response-based KD losses
 - `--w_resp_mask`, `--w_resp_mag`, `--w_resp_pha`, `--w_resp_com`: per-component weights of the Response KD loss (Mask, Magnitude, Phase, Complex)
 - `--include_relation` / `--w_relation`: enable Relation-based KD loss (self-similarity matrix across time/frequency)
+- `--similarity_preserving` / `--w_similarity` / `--similarity_student_idx` / `--similarity_teacher_idx`: enable Similarity-Preserving KD (batch-wise pairwise-similarity matching); unlike Feature/Relation KD it is not limited by student/teacher block-count alignment, so it also works with 1-block students
 - `--feature_noise` / `--noise_std_start` / `--noise_std_end` / `--noise_schedule`: Feature Noise Annealing on the Teacher's target features
 - `--layer_curriculum`: progressively expand the set of Teacher layers used for Feature KD
 - `--two_stage` / `--two_stage_ratio`: hard-switch training into a Teacher-only representation stage followed by a Ground-Truth-only fine-tuning stage
+- `--seed`: fix random/numpy/torch seeds for closer run-to-run reproducibility
+- `--resume` / `--resume_path`: resume training from a full training-state checkpoint (model + optimizer + scheduler + epoch + best_val + no_improve + RNG state), kept separate from the `--model_save` inference checkpoint
+- `--use_amp` / `--num_workers` / `--no_cudnn_benchmark`: pure speed options that do not change training results
+- `--swa` / `--swa_dir`: collect per-epoch checkpoints after the schedule ends, for Stochastic Weight Averaging
 
 (Optional) check that the logged loss terms are on a comparable scale:
 
     python check_loss_balance.py <path/to/log.csv> \
         --w_mask 3.5 --w_mag 5.0 --w_pha 0.3 --w_com 2.3 --w_feature 0.3
-
+        
 ## 7. Evaluate the Student
 
 Run:

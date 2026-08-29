@@ -260,6 +260,8 @@ Run:
         --dataset dataset/test_spectrogram.pt \
         --csv-out <path/to/results.csv> \
         --exp-alias "Student_KD"
+        
+Run:
 
 python inference_student_patched.py \
     --config config/student_16ch_1blk.yaml \

@@ -260,8 +260,18 @@ Run:
         --dataset dataset/test_spectrogram.pt \
         --csv-out <path/to/results.csv> \
         --exp-alias "Student_KD"
-        
-To reproduce the per-SNR breakdown reported in the paper, additionally pass --snr_labels <path/to/test_snr_labels.json> (built with build_snr_labels.py, not yet committed to this repo — regenerate it from the test split definition in step 3, or add the script here for full reproducibility). This writes an extra *_by_snr.csv file alongside the main results CSV.
+
+
+Run:
+ 
+    python inference_student_patched.py \
+        --config config/student_16ch_1blk.yaml \
+        --weights <path/to/student_checkpoint.pth> \
+        --dataset dataset/test_spectrogram.pt \
+        --csv-out <path/to/results.csv> \
+        --exp-alias "Student_KD"
+ 
+To reproduce the per-SNR breakdown reported in the paper, additionally pass `--snr_labels <path/to/test_snr_labels.json>` (built with `build_snr_labels.py`, **not yet committed to this repo** — regenerate it from the test split definition in step 3, or add the script here for full reproducibility). This writes an extra `*_by_snr.csv` file alongside the main results CSV.
 
 `inference_demo.py` also works with a Student checkpoint and config for single-sample visualization, the same as step 5.
 

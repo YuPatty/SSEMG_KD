@@ -5,16 +5,19 @@ Batch inference and paper-metric evaluation for SSEMG-Net.
 Usage:
     python3 inference_student_patched.py \
         --config config/student_16ch_1blk.yaml \
-        --weights model_weight/student_student_16ch_1blk_noKD.pth \
+        --weights model_weight/student_16ch_1blk_respKD.pth \
         --dataset dataset/test_spectrogram.pt \
         --snr_labels test_snr_labels.json \
-        --csv-out results/student_16ch_1blk_noKD_metrics.csv \
-        --exp-alias "16ch_1blk_noKD"
+        --csv-out results/student_16ch_1blk_respKD_metrics.csv \
+        --exp-alias "16ch_1blk_respKD"
 
 Notes:
   - Loads SSEMGNet checkpoints strictly by default.
   - RMSE_MF denotes Mean Frequency (spectral centroid), matching the paper.
   - Median Frequency is reported only as an optional additional metric.
+  - `--snr_labels` is optional: without it, only the overall average is printed;
+    with a {split}_snr_labels.json file (see build_snr_labels.py), results are
+    additionally broken down per SNR level and written to a `*_by_snr.csv` file.
 """
 import os, sys, yaml, torch, numpy as np
 import csv, json, time
@@ -466,7 +469,6 @@ if not args.only_idxs.strip():
             for row in snr_avg_rows:
                 writer.writerow(row)
         print(f"\n[info] 每個 SNR 檔位的分數已存到 {snr_csv_path}")
-        print("       這份 CSV 可以直接餵進 plot_snrimp_curve.py 畫折線圖。")
 
 # ---- Plot ----
 from matplotlib import mlab

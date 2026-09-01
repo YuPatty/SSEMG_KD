@@ -212,7 +212,7 @@ In this repository, `RMSE_MF(Hz)` denotes the error of **mean frequency**, defin
 
 The Student (`StudentSSEMGNet`) is trained with a Teacher SSEMG-Net checkpoint frozen (`eval()`, no gradient updates), using the same train/valid/test tensor datasets built in step 3.
 
-The command below reproduces the reported edge-deployment result (16ch/1blk, Response KD only, SNRimp ≈ 20.05 dB):
+The command below reproduces the reported edge-deployment result (16ch/1blk, Response KD only, SNRimp ≈ 20.15 dB):
 
     python pipeline_distill_crossarch.py \
         --teacher_config config/config_spectrogram_v19_tt_mask.yaml \
@@ -221,9 +221,9 @@ The command below reproduces the reported edge-deployment result (16ch/1blk, Res
         --data_root dataset \
         --epochs 150 \
         --kd_weight_mode annealed --anneal_schedule linear \
-        --w_resp_mask 3.5 --w_resp_mag 5.0 --w_resp_pha 0.3 --w_resp_com 2.3 \
+        --w_resp_mask 3.5 --w_resp_mag 5.0 --w_resp_com 2.3 \
         --w_feature 0 \
-        --patience 10 \
+        --patience 20 \
         --log_csv log_student_16ch_1blk_respKD.csv \
         --model_save model_weight/student_16ch_1blk_respKD.pth
 
@@ -244,11 +244,6 @@ Key options:
 - `--resume` / `--resume_path`: resume training from a full training-state checkpoint (model + optimizer + scheduler + epoch + best_val + no_improve + RNG state), kept separate from the `--model_save` inference checkpoint
 - `--use_amp` / `--num_workers` / `--no_cudnn_benchmark`: pure speed options that do not change training results
 - `--swa` / `--swa_dir`: collect per-epoch checkpoints after the schedule ends, for Stochastic Weight Averaging
-
-(Optional) check that the logged loss terms are on a comparable scale:
-
-    python check_loss_balance.py <path/to/log.csv> \
-        --w_mask 3.5 --w_mag 5.0 --w_pha 0.3 --w_com 2.3 --w_feature 0.3
         
 ## 7. Evaluate the Student
 

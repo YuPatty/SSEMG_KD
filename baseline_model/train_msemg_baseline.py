@@ -26,7 +26,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
 ROOT_DIR = os.path.dirname(__file__)
-sys.path.insert(0, os.path.join(ROOT_DIR, 'MECG-E'))
+sys.path.insert(0, ROOT_DIR)
 
 from pipeline_spectrogram import load_dataset, auto_select_gpu
 from models.StudentNet import mag_pha_istft   # 純函式，不依賴 mamba_ssm

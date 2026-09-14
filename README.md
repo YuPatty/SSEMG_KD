@@ -17,8 +17,8 @@ The Student model (`StudentSSEMGNet`) replaces the TF-Bi-Mamba backbone with dep
 - `prepare_data.py`: NinaPro DB2 and ECG preprocessing, segmentation, and noisy-mixture generation
 - `convert.py`: waveform-to-spectrogram conversion
 - `make_dataset_spectrogram.py`: noisy-clean spectrogram pairing and tensor dataset construction
-- `MECG-E/models/SSEMGNet.py`: SSEMG-Net (Teacher) model architecture
-- `MECG-E/models/StudentNet.py`: StudentSSEMGNet (Student) model architecture
+- `models/SSEMGNet.py`: SSEMG-Net (Teacher) model architecture
+- `models/StudentNet.py`: StudentSSEMGNet (Student) model architecture
 - `pipeline_spectrogram.py`: Teacher training pipeline
 - `pipeline_distill_crossarch.py`: cross-architecture knowledge distillation pipeline (trains the Student)
 - `distill_loss.py`: KD loss functions, annealing and curriculum schedulers

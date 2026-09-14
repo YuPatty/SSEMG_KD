@@ -1,6 +1,3 @@
-# ────────────────────────────────────────────────────
-# /data/member1/user_howardshih/shihsemg/pipeline_spectrogram.py 
-# ────────────────────────────────────────────────────
 import os, re, sys, csv, subprocess, torch, math
 from contextlib import nullcontext
 from torch.utils.data import DataLoader, TensorDataset
@@ -13,7 +10,7 @@ def _autocast_ctx(device):            # 依舊包一層，之後呼叫不用改
 
 # ── 讓 MECGE 可以 import ───────────────────────────
 ROOT_DIR = os.path.dirname(__file__)
-sys.path.insert(0, os.path.join(ROOT_DIR, 'MECG-E'))
+sys.path.insert(0, ROOT_DIR)
 # from models.SSEMGNet import SSEMGNet           # noqa: E402
 
 # ═══════════════════════════════════════════════════

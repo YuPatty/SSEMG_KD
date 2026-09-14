@@ -1,22 +1,7 @@
 # ────────────────────────────────────────────────────
-# train_sdemg_baseline.py  (patched)
-# 用 ConditionalModel + GaussianDiffusion1D（來自 yt-tony-liu/SDEMG 的
-# deep_filter_model.py / ddpm_1d.py）當作額外的 no-KD baseline。
-#
-# ⚠️ 這個版本補上了跟 SDEMG 官方 trainer.py 對齊的兩個機制（先前版本漏掉的）：
-#   1. ReduceLROnPlateau(factor=0.5, patience=4) —— val_loss 連續 4 epoch 沒進步就把 lr 減半
-#   2. clip_grad_norm_(parameters, max_norm=1.0) —— 每個 batch 都做梯度裁剪
-# 這兩個都是直接對照 SDEMG 官方 trainer.py 第 105 / 168 / 190 行加上去的，
-# 除此之外訓練邏輯（diffusion loss、資料來源、early stopping）都跟原本版本一樣，
-# 只改動這兩處，方便做「補上這兩個機制前後」的乾淨對照實驗。
-#
-# 訓練配方沿用 SDEMG repo 自帶的 cfg/default.yaml（DiffuEMG_10sec_EP40_SS50）：
-#   train_epochs=40, batch_size=64, condition=True, sampling_steps(timesteps)=50,
-#   beta_schedule='cosine', objective='pred_noise', loss_function='l2', lr=1e-4
-#
 # 用法：
 #   python train_sdemg_baseline.py \
-#       --sdemg_repo /home/taes10056/SDEMG \
+#       --sdemg_repo /path/to/SDEMG \
 #       --student_config config_student_crossarch.yaml \
 #       --data_root dataset --epochs 40 --batch_size 64 --lr 1e-4
 # ────────────────────────────────────────────────────

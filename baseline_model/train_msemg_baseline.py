@@ -14,7 +14,7 @@
 #
 # 用法：
 #   python train_msemg_baseline.py \
-#       --msemg_repo /home/taes10056/MSEMG \
+#       --msemg_repo /path/to/MSEMG \
 #       --student_config config_student_crossarch.yaml \
 #       --data_root dataset --epochs 100 --batch_size 16 --lr 1e-4 \
 #       --feats 64 --n_layer 1

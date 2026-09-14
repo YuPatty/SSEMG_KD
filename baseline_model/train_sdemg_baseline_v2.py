@@ -35,7 +35,7 @@ _pre_args, _ = _p.parse_known_args()
 ROOT_DIR = _pre_args.ssemg_net_root or os.path.dirname(os.path.abspath(__file__))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
-sys.path.insert(0, os.path.join(ROOT_DIR, 'MECG-E'))
+sys.path.insert(0, ROOT_DIR)
 
 from pipeline_spectrogram import load_dataset, auto_select_gpu
 from models.StudentNet import mag_pha_istft   # 純函式，不依賴 mamba_ssm

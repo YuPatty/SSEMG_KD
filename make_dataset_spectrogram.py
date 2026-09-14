@@ -1,4 +1,3 @@
-# /data/member1/user_howardshih/shihsemg/make_dataset_spectrogram.py
 import os
 import argparse
 import json

@@ -8,7 +8,7 @@ from tqdm import tqdm
 from pipeline_spectrogram import load_dataset, auto_select_gpu, _batch_mf_err
 
 ROOT_DIR = os.path.dirname(__file__)
-sys.path.insert(0, os.path.join(ROOT_DIR, 'MECG-E'))
+sys.path.insert(0, ROOT_DIR)
 from models.SSEMGNet import SSEMGNet
 from models.StudentNet import StudentSSEMGNet
 

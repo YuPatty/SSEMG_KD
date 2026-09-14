@@ -13,9 +13,9 @@
 #
 # 用法：
 #   python build_snr_labels.py \
-#       --data_root /home/taes10056/SSEMG-Net/semg_data/processed \
+#       --data_root /path/to/SSEMG-Net/semg_data/processed \
 #       --split test \
-#       --spectrogram_pt /home/taes10056/SSEMG-Net/dataset/test_spectrogram.pt \
+#       --spectrogram_pt /path/to/SSEMG-Net/dataset/test_spectrogram.pt \
 #       --out test_snr_labels.json
 # ────────────────────────────────────────────────────
 import argparse

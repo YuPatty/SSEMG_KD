@@ -1,4 +1,3 @@
-# /data/member1/user_howardshih/shihsemg/utils.py
 import os
 import math
 import torch

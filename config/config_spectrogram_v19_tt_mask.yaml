@@ -1,5 +1,3 @@
-# /data/member1/user_howardshih/shihsemg/config/config_spectrogram_v19_tt_mask.yaml
-
 exp:
   name: v19_tt_mask
 train:

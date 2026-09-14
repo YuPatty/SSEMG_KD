@@ -1,5 +1,3 @@
-# /data/member1/user_howardshih/shihsemg/convert.py
-
 import os
 import torch
 import numpy as np

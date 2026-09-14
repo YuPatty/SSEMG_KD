@@ -192,7 +192,7 @@ else:
     print('⚠ No GPU with enough memory → CPU')
 
 # ---- Import SSEMG-Net ----
-sys.path.insert(0, os.path.join(ROOT, 'MECG-E'))
+sys.path.insert(0, ROOT)
 from models.StudentNet import StudentSSEMGNet
 
 from spectrogram_utils import mag_pha_istft

@@ -1,4 +1,3 @@
-# /data/member1/user_howardshih/shihsemg/spectrogram_utils.py
 import torch
 
 def mag_pha_stft(y, n_fft, hop_size, win_size, compress_factor=1.0, center=True):

@@ -27,7 +27,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
 ROOT_DIR = os.path.dirname(__file__)
-sys.path.insert(0, os.path.join(ROOT_DIR, 'MECG-E'))
+sys.path.insert(0, ROOT_DIR)
 
 from fcn_baseline_model import FCN_01
 from pipeline_spectrogram import load_dataset, auto_select_gpu

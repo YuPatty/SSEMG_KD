@@ -11,9 +11,6 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
-# 同 train_msemg_baseline.py 的修正：ROOT_DIR 改用 --ssemg_net_root 明確指定，
-# 腳本檔案本身放在任何地方都能跑，不用跟 pipeline_spectrogram.py / MECG-E/
-# 放在同一層資料夾。不傳這個參數時退回原本行為（假設腳本就放在 SSEMG-Net 裡）。
 _p = argparse.ArgumentParser(add_help=False)
 _p.add_argument('--ssemg_net_root', default=None)
 _pre_args, _ = _p.parse_known_args()
@@ -56,7 +53,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--sdemg_repo', required=True, help='clone 下來的 SDEMG repo 路徑')
     p.add_argument('--ssemg_net_root', default=None,
-                    help='SSEMG-Net repo 的路徑（用來找 pipeline_spectrogram.py / MECG-E/）。'
+                    help='SSEMG-Net repo 的路徑（用來找 pipeline_spectrogram.py / models/）。'
                          '不指定時預設腳本檔案自己所在的資料夾。')
     p.add_argument('--student_config', default='config_student_crossarch.yaml',
                     help="只用來讀 n_fft/hop_size/win_size/compress_factor 等 STFT 參數")

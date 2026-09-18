@@ -7,10 +7,10 @@
 #   - DenseEncoder / MaskDecoder / PhaseDecoder / ComplexDecoder and the loss
 #     computation reuse the same logic as SSEMGNet.py (pure CNN modules with
 #     no Mamba dependency)
-#   - The only replacement is the 4-layer TSMambaBlock → TSConvBlock, which
-#     models the temporal/frequency axes with depthwise-separable convolutions
-#     (grouped conv + depthwise-separable conv in place of the heavier
-#     sequence-modeling module)
+#   - The only replacement is the 4-layer TSMambaBlock → TFConvBlock (LiteEMG's
+#     TF-ConvBlock), which models the temporal/frequency axes with
+#     depthwise-separable convolutions (grouped conv + depthwise-separable
+#     conv in place of the heavier sequence-modeling module)
 #   - The forward_spectrogram() output interface (self.last_feats /
 #     self.last_outputs / returned loss_core) matches the teacher's, so
 #     distill_loss.py works with either model unchanged
@@ -230,7 +230,7 @@ class ComplexDecoder(nn.Module):
 
 
 # ══════════════════════════════════════════════════════════
-# 核心替換：TSConvBlock 取代 TSMambaBlock
+# 核心替換：TFConvBlock 取代 TSMambaBlock（對應 LiteEMG 論文的 TF-ConvBlock）
 # → 對應 ULde-net 的 depthwise separable conv 設計
 # ══════════════════════════════════════════════════════════
 class DepthwiseSeparableConv1d(nn.Module):
@@ -251,12 +251,13 @@ class DepthwiseSeparableConv1d(nn.Module):
         return self.act(x)
 
 
-class TSConvBlock(nn.Module):
+class TFConvBlock(nn.Module):
     """
     Cross-architecture 替換 TSMambaBlock，I/O shape 保持一致 [B,C,T,F/2]，
     這樣 distill_loss.py 的 feature-based KD（1x1 conv 投影對齊）不用改。
     時間軸用兩層不同 dilation 的 depthwise separable conv 擴大感受野，
-    近似 Mamba 的長距離依賴建模能力（雖然理論上限不同，但足以做 KD baseline）。
+    再接一層頻率軸的 depthwise separable conv 做局部頻譜建模，
+    對應 LiteEMG 論文的 TF-ConvBlock（temporal modeling → frequency modeling）。
     """
     def __init__(self, h):
         super().__init__()
@@ -291,7 +292,7 @@ class AttrDict(dict):
 
 # ══════════════════════════════════════════════════════════
 # StudentSSEMGNet：介面與 SSEMGNet 一致（loss 計算邏輯照抄，
-# 唯一差異是中間層用 TSConvBlock，且完全不碰 mamba_ssm）
+# 唯一差異是中間層用 TFConvBlock，且完全不碰 mamba_ssm）
 # ══════════════════════════════════════════════════════════
 class StudentSSEMGNet(nn.Module):
     def __init__(self, config):
@@ -309,7 +310,7 @@ class StudentSSEMGNet(nn.Module):
         self.num_tscblocks = h['num_tscblocks']
 
         self.dense_encoder = DenseEncoder(h, in_channel=2)
-        self.TSConv = nn.ModuleList([TSConvBlock(h) for _ in range(h['num_tscblocks'])])
+        self.TFConv = nn.ModuleList([TFConvBlock(h) for _ in range(h['num_tscblocks'])])
         self.mask_decoder = MaskDecoder(h, out_channel=1)
         self.complex_decoder = ComplexDecoder(h, out_channel=1)
 
@@ -322,7 +323,7 @@ class StudentSSEMGNet(nn.Module):
         return self.forward_spectrogram(clean_spec, noisy_spec)
 
     def forward_spectrogram(self, clean_spec, noisy_spec):
-        """跟 SSEMGNet.forward_spectrogram 邏輯完全一致，只是 TSMamba → TSConv。"""
+        """跟 SSEMGNet.forward_spectrogram 邏輯完全一致，只是 TSMamba → TFConv。"""
         def istft32(mag_FT, pha_FT):
             return mag_pha_istft(mag_FT.float(), pha_FT.float(),
                                   n_fft=self.h['n_fft'], hop_size=self.h['hop_size'],
@@ -352,7 +353,7 @@ class StudentSSEMGNet(nn.Module):
         x_feat = self.dense_encoder(x_input)
         feat_list = []
         for i in range(self.num_tscblocks):
-            x_feat = self.TSConv[i](x_feat)
+            x_feat = self.TFConv[i](x_feat)
             feat_list.append(x_feat)
         self.last_feats = feat_list
 

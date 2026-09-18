@@ -1,15 +1,4 @@
 """
-inference_demo.py
-Batch inference and paper-metric evaluation for SSEMG-Net.
-
-Usage:
-  python inference_demo.py \
-      --config config/config_spectrogram_v19_tt_mask.yaml \
-      --weights model_weight/v19_tt_mask_mix_nv0_weights.pth \
-      --dataset dataset/test_spectrogram.pt \
-      --batch 64 \
-      --index 1786
-
 Notes:
   - Loads SSEMGNet checkpoints strictly by default.
   - RMSE_MF denotes Mean Frequency (spectral centroid), matching the paper.
@@ -280,7 +269,7 @@ def denoise_batch(noisy_spec):
         xin_2TF = torch.stack([mag_TF, pha_TF], dim=1)
 
     feat = model.dense_encoder(xin_2TF)
-    for blk in model.TSConv:
+    for blk in model.TFConv:
         feat = blk(feat)
     mask = model.mask_decoder(feat)
     if noisy_spec.size(0) == 1:

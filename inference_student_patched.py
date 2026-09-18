@@ -299,7 +299,7 @@ def denoise_batch(noisy_spec):
         xin_2TF = torch.stack([mag_TF, pha_TF], dim=1)
 
     feat = model.dense_encoder(xin_2TF)
-    for blk in model.TSConv:
+    for blk in model.TFConv:
         feat = blk(feat)
     mask = model.mask_decoder(feat)
     if noisy_spec.size(0) == 1:

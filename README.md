@@ -30,8 +30,8 @@ The Student model (`StudentSSEMGNet`) replaces the TF-Bi-Mamba backbone with dep
 - `utils.py`: evaluation metrics
 - `config/local_cfg.example.yaml`: example dataset-path configuration
 - `config/config_spectrogram_v19_tt_mask.yaml`: SSEMG-Net (Teacher) paper configuration
-- `config/config_student_crossarch.yaml`: Student model configuration (32ch, 2 TSConvBlocks)
-- `config/student_16ch_1blk.yaml`: edge-deployment Student configuration (16ch, 1 TSConvBlock — used for the reported result)
+- `config/config_student_crossarch.yaml`: Student model configuration (32ch, 2 TFConvBlocks)
+- `config/student_16ch_1blk.yaml`: edge-deployment Student configuration (16ch, 1 TFConvBlock — used for the reported result)
 - `config/local_cfg.example.yaml`: example dataset-path configuration
 - `baseline_model/`: baseline model training and inference scripts (FCN, MSEMG, SDEMG) used for comparison against SSEMG-Net
 
